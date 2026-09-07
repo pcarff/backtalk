@@ -699,11 +699,16 @@ async def amain():
         kind = ("timed out" if isinstance(e, asyncio.TimeoutError)
                 else f"failed: {e!r}"[:220])
         log(f"[backtalk] BRAIN CONNECT {kind}")
-        mouth.say("Bad news. The voice and the face are fine, but I "
-                  "couldn't reach my brain, the Claude Code session. "
-                  "Check this window for the error. The usual causes: "
-                  "Claude Code isn't signed in, the internet is down, "
-                  "or the plan is out of usage.")
+        if str(CFG.get("brain", "claude")).lower() in ("local", "openai", "llama", "vllm", "ollama"):
+            mouth.say("Bad news. The voice and the face are fine, but I "
+                      f"couldn't reach my local brain at {CFG.get('api_base')}. "
+                      "Check if your local inference server is running.")
+        else:
+            mouth.say("Bad news. The voice and the face are fine, but I "
+                      "couldn't reach my brain, the Claude Code session. "
+                      "Check this window for the error. The usual causes: "
+                      "Claude Code isn't signed in, the internet is down, "
+                      "or the plan is out of usage.")
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
