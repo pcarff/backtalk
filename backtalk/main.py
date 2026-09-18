@@ -54,6 +54,7 @@ Say "goodbye <name>" / "end voice mode" to hang up. Ctrl-C works.
 """
 import asyncio
 import json
+import os
 import queue
 import re
 import socket
@@ -679,7 +680,7 @@ async def amain():
     loop = asyncio.get_event_loop()
     # Warm the engines while the greeting plays: the STT model load and
     # the brain's prompt-cache toll both hide behind the spoken line.
-    loop.run_in_executor(None, warm_ears)
+    warm_ears_fut = loop.run_in_executor(None, warm_ears)
     # THE BRAIN CONNECT, guarded. This is the one startup step that
     # needs a signed-in Claude Code, internet, and available usage.
     # When it fails or hangs, the mouth still works, so SAY SO instead
@@ -707,6 +708,11 @@ async def amain():
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
+    try:
+        await asyncio.wait_for(asyncio.shield(warm_ears_fut), 60)
+        log("[backtalk] ears warm and ready")
+    except Exception as e:
+        log(f"[ears] warmup error: {e!r}")
     # the hidden warmup ping is plumbing, not conversation
     brain.session.update(turns=0, out_tokens=0, in_tokens=0, cost=0.0)
     # a configured effort level applies at launch (saved by the spoken
@@ -721,6 +727,26 @@ async def amain():
     speak_task: asyncio.Task | None = None
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
+
+    def _file_typed_reader(q: "queue.Queue[str]"):
+        sig_p = os.path.join(CFG.get("signals_dir", "/dev/shm/signals"), ".typed_input")
+        while True:
+            try:
+                if os.path.exists(sig_p):
+                    with open(sig_p, "r", encoding="utf-8") as f:
+                        text = f.read().strip()
+                    try:
+                        os.remove(sig_p)
+                    except Exception:
+                        pass
+                    if text:
+                        log(f"[visualizer] typed input: {text}")
+                        q.put(text)
+            except Exception:
+                pass
+            time.sleep(0.08)
+
+    threading.Thread(target=_file_typed_reader, args=(typed_q,), daemon=True).start()
     typed_fut: asyncio.Future | None = None
 
     async def run_console(verb):
@@ -896,7 +922,8 @@ async def amain():
                                          for q in QUIT_PHRASES):
                 mouth.say("Staying as we are.")
                 return True
-        if any(q in text.lower() for q in QUIT_PHRASES):
+        norm_t = _norm_speech(text)
+        if any(_norm_speech(q) in norm_t for q in QUIT_PHRASES):
             if speak_task and not speak_task.done():
                 speak_task.cancel()
             mouth.shut_up()
@@ -1111,6 +1138,8 @@ def main():
         asyncio.run(amain())
     except KeyboardInterrupt:
         print("\n[backtalk] interrupted — hanging up", flush=True)
+    finally:
+        os._exit(0)
 
 
 if __name__ == "__main__":
