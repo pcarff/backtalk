@@ -135,18 +135,55 @@ def parse_tool_call(text: str) -> tuple[str, dict] | None:
     return None
 
 
+def get_default_workspace() -> str:
+    """Find the best existing base workspace directory across Cortex and local laptop."""
+    candidates = [
+        "/workspaces_nvme/AnZym_Robot_System",
+        "/workspaces/AnZym_Robot_System",
+        "/workspaces",
+        "/workspaces_nvme",
+        "/Workspaces/AnZym_Robot_System",
+        "/workspaces/shared_workspaces",
+        "/Workspaces",
+        os.path.expanduser("~/my-agent"),
+        os.path.expanduser("~"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return os.getcwd()
+
+
 def resolve_project_path(target: str, current_cwd: str) -> str:
     """Map friendly name or path to absolute filesystem directory."""
     cleaned = target.strip().lower().replace("_", " ").replace("-", " ")
     for alias, p in PROJECT_ALIASES.items():
         if alias in cleaned or cleaned == alias:
+            if not os.path.exists(p):
+                candidates = [
+                    "/workspaces" + p[len("/Workspaces"):] if p.startswith("/Workspaces") else "",
+                    "/workspaces/shared_workspaces/" + os.path.basename(p),
+                    "/workspaces/Workspaces/" + os.path.basename(p),
+                    "/workspaces/" + os.path.basename(p),
+                    "/workspaces" + p[len("/anzym"):] if p.startswith("/anzym") else "",
+                ]
+                for cand in candidates:
+                    if cand and os.path.exists(cand):
+                        return cand
             return p
     expanded = os.path.expanduser(target.strip())
     if os.path.isabs(expanded) and os.path.exists(expanded):
         return expanded
+    if expanded.startswith("/Workspaces"):
+        alt = "/workspaces" + expanded[len("/Workspaces"):]
+        if os.path.exists(alt):
+            return alt
     rel = os.path.join(current_cwd, target.strip())
     if os.path.exists(rel):
         return rel
+    ws_candidate = os.path.join("/workspaces", target.strip())
+    if os.path.exists(ws_candidate):
+        return ws_candidate
     anz = os.path.join("/anzym", target.strip())
     if os.path.exists(anz):
         return anz
@@ -265,8 +302,10 @@ def search_agent_memories(query: str, source: str = "all", max_results: int = 5)
 
 def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
     """Execute a local, web, or workspace tool safely with recursive depth."""
-    default_ws = "/workspaces_nvme/AnZym_Robot_System" if os.path.exists("/workspaces_nvme/AnZym_Robot_System") else "/Workspaces/AnZym_Robot_System"
-    cwd = brain_ref.active_project_dir if brain_ref else default_ws
+    default_ws = get_default_workspace()
+    cwd = brain_ref.active_project_dir if (brain_ref and hasattr(brain_ref, "active_project_dir") and os.path.exists(brain_ref.active_project_dir)) else default_ws
+    if brain_ref and hasattr(brain_ref, "active_project_dir") and not os.path.exists(brain_ref.active_project_dir):
+        brain_ref.active_project_dir = default_ws
     try:
         if tool_name == "switch_workspace":
             target = args.get("path") or args.get("project") or args.get("name", "")
@@ -521,16 +560,52 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                     break
             return f"Found matching files for '{query}':\n" + "\n".join(matches)
 
+        elif tool_name == "write_file":
+            raw_p = args.get("path") or args.get("file") or ""
+            content = args.get("content") or args.get("text") or args.get("code") or ""
+            p = raw_p if os.path.isabs(raw_p) else os.path.join(cwd, raw_p)
+            p = os.path.expanduser(p)
+            if p.startswith("/Workspaces") and not os.path.exists(os.path.dirname(p)):
+                alt = "/workspaces" + p[len("/Workspaces"):]
+                p = alt
+            print(f" [MILO] ✍️ Writing file: {p} ({len(content)} chars)...", flush=True)
+            _set_signal_state("thinking")
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Success: Wrote {len(content)} characters to {p}."
+            except Exception as e:
+                return f"Error writing file {p}: {e}"
+
         elif tool_name == "run_command":
             cmd = args.get("cmd", "")
-            target_cwd = args.get("cwd", cwd)
-            target_cwd = target_cwd if os.path.isabs(target_cwd) else os.path.join(cwd, target_cwd)
+            target_cwd = args.get("cwd") or cwd
+            if not os.path.isabs(target_cwd):
+                target_cwd = os.path.join(cwd, target_cwd)
             target_cwd = os.path.expanduser(target_cwd)
+
+            # Auto-heal target_cwd if path does not exist
+            if not os.path.exists(target_cwd):
+                if target_cwd.startswith("/Workspaces"):
+                    alt = "/workspaces" + target_cwd[len("/Workspaces"):]
+                    if os.path.exists(alt):
+                        target_cwd = alt
+                elif not target_cwd.startswith("/workspaces"):
+                    alt = os.path.join("/workspaces", os.path.basename(target_cwd))
+                    if os.path.exists(alt):
+                        target_cwd = alt
+                if not os.path.exists(target_cwd):
+                    target_cwd = get_default_workspace()
+
             print(f" [MILO] ⚙️ Running command: $ {cmd} (in {target_cwd})...", flush=True)
             _set_signal_state("thinking")
-            res = subprocess.run(cmd, shell=True, cwd=target_cwd, capture_output=True, text=True, timeout=15)
-            out = res.stdout if res.stdout else res.stderr
-            return f"Command output ($ {cmd} in {target_cwd}):\n{out[:2000]}"
+            try:
+                res = subprocess.run(cmd, shell=True, cwd=target_cwd, capture_output=True, text=True, timeout=30)
+                out = res.stdout if res.stdout else res.stderr
+                return f"Command output ($ {cmd} in {target_cwd}):\n{out[:2000]}"
+            except Exception as e:
+                return f"Command execution failed: {e}"
 
         elif tool_name == "generate_image":
             prompt = str(args.get("prompt") or args.get("description") or "").strip()
@@ -763,6 +838,7 @@ Available Tools:
 - switch_workspace(path): Switch active workspace.
 - list_dir(path): Inspect directories.
 - read_file(path, max_lines): Read source code or files.
+- write_file(path, content): Create or overwrite a source file, Arduino sketch, or configuration file directly without shell escaping issues.
 - search_files(path, query): Search for files by name.
 - run_command(cmd, cwd): Execute shell commands.
 - generate_image(prompt): Generate an image using the FLUX.1 diffusion engine on Cortex and display it on the user's screen.
@@ -774,7 +850,7 @@ class WarmBrain:
                  resume_id: str | None = None):
         self.api_base = CFG.get("api_base", "http://127.0.0.1:8080/v1")
         self.model = model or CFG.get("model", "qwen3.8-27b")
-        self.active_project_dir = "/Workspaces/AnZym_Robot_System"
+        self.active_project_dir = get_default_workspace()
         self._can_use_tool = can_use_tool
         self.session = {"turns": 0, "out_tokens": 0, "in_tokens": 0, "cost": 0.0}
         self.messages = []
