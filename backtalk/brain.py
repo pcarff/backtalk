@@ -26,6 +26,13 @@ SESSION_FILE = SIGNALS_DIR / ".backtalk_session"
 
 # Known Project Aliases for quick voice switching
 PROJECT_ALIASES = {
+    # Romeo BLE / Sonar Projects
+    "romeo": "/workspaces/Romeo_BLE",
+    "romeo ble": "/workspaces/Romeo_BLE",
+    "romeo bld": "/workspaces/Romeo_BLE",
+    "romeo board": "/workspaces/Romeo_BLE",
+    "sonar": "/workspaces/Romeo_BLE",
+    "sonar sweep": "/workspaces/Romeo_BLE",
     "robots": "/Workspaces/AnZym_Robot_System",
     "fleet": "/Workspaces/AnZym_Robot_System",
     "robot fleet": "/Workspaces/AnZym_Robot_System",
@@ -139,12 +146,12 @@ def get_default_workspace() -> str:
     """Find the best existing base workspace directory across Cortex and local laptop."""
     candidates = [
         "/workspaces_nvme/AnZym_Robot_System",
-        "/workspaces/AnZym_Robot_System",
         "/workspaces",
         "/workspaces_nvme",
+        "/Workspaces",
+        "/workspaces/AnZym_Robot_System",
         "/Workspaces/AnZym_Robot_System",
         "/workspaces/shared_workspaces",
-        "/Workspaces",
         os.path.expanduser("~/my-agent"),
         os.path.expanduser("~"),
     ]
@@ -171,6 +178,15 @@ def resolve_project_path(target: str, current_cwd: str) -> str:
                     if cand and os.path.exists(cand):
                         return cand
             return p
+
+    # Case-insensitive directory matching in /workspaces
+    if os.path.exists("/workspaces"):
+        target_clean = target.strip().strip("/").lower().replace(" ", "_").replace("-", "_")
+        for entry in os.listdir("/workspaces"):
+            entry_clean = entry.lower().replace(" ", "_").replace("-", "_")
+            if entry_clean == target_clean:
+                return os.path.join("/workspaces", entry)
+
     expanded = os.path.expanduser(target.strip())
     if os.path.isabs(expanded) and os.path.exists(expanded):
         return expanded
@@ -840,7 +856,7 @@ Available Tools:
 - read_file(path, max_lines): Read source code or files.
 - write_file(path, content): Create or overwrite a source file, Arduino sketch, or configuration file directly without shell escaping issues.
 - search_files(path, query): Search for files by name.
-- run_command(cmd, cwd): Execute shell commands.
+- run_command(cmd, cwd): Execute shell commands. Note: 'arduino-cli' is installed for compiling and flashing AVR/ESP32 boards (e.g. arduino-cli compile --fqbn arduino:avr:uno <sketch_dir> && arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno <sketch_dir>).
 - generate_image(prompt): Generate an image using the FLUX.1 diffusion engine on Cortex and display it on the user's screen.
 """
 
@@ -1024,9 +1040,13 @@ class WarmBrain:
         # Step 2: Stream final voice response to Kokoro TTS
         buf = ""
         full_reply = ""
+        yielded_any = False
+        speech_messages = self.messages + [
+            {"role": "system", "content": "You MUST deliver your spoken flight director briefing directly to the user now in natural speech. Do NOT call any tools. Do NOT output JSON, XML, or code blocks. Report your status, findings, or errors clearly and guide the user on the next step."}
+        ]
         payload = {
             "model": self.model,
-            "messages": self.messages,
+            "messages": speech_messages,
             "stream": True,
             "temperature": 0.7,
             "max_tokens": 2048,
@@ -1070,21 +1090,35 @@ class WarmBrain:
                                     cleaned = _clean_text(sentence)
                                     if cleaned:
                                         yield cleaned
+                                        yielded_any = True
                         except Exception:
                             continue
         except Exception as e:
             log(f"[brain] error querying {self.api_base}: {e}")
             yield "Sorry, I lost connection to the local model."
+            yielded_any = True
 
         tail = _clean_text(buf)
         if tail and not self._interrupted:
             yield tail
+            yielded_any = True
 
-        if full_reply:
-            self.messages.append({"role": "assistant", "content": _clean_text(full_reply)})
-            self.session["turns"] += 1
-            self.session["out_tokens"] += len(full_reply.split()) * 2
-            self.session["in_tokens"] += len(utterance.split()) * 2
+        if not yielded_any and not self._interrupted:
+            p = parse_tool_call(full_reply)
+            if p:
+                tname, targs = p
+                log(f"[brain] LLM attempted tool call during speech phase: {tname}")
+                res = execute_tool(tname, targs, self)
+                yield f"I ran {tname}. Output: {_clean_text(res[:250])}. Ready for your next command, boss."
+            else:
+                log("[brain] warning: zero sentences yielded from LLM stream, generating fallback report")
+                yield "Copy that, boss. I've finished processing the workspace files and hardware state. Ready for your next command."
+
+        saved_reply = _clean_text(full_reply) if full_reply else "Acknowledged."
+        self.messages.append({"role": "assistant", "content": saved_reply})
+        self.session["turns"] += 1
+        self.session["out_tokens"] += len(saved_reply.split()) * 2
+        self.session["in_tokens"] += len(utterance.split()) * 2
 
         self._dirty = False
         self._interrupted = False
