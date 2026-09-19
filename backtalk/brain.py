@@ -1037,7 +1037,28 @@ class WarmBrain:
                                f"If you need to read a specific code file, call read_file. Otherwise, deliver your spoken flight director answer directly."
                 })
 
-        # Step 2: Stream final voice response to Kokoro TTS
+        # If the LLM delivered a direct flight director answer without further tool calls,
+        # stream it immediately to Kokoro TTS without paying a second LLM inference penalty.
+        if not parsed and reply:
+            cleaned_reply = _clean_text(reply)
+            if cleaned_reply:
+                self.messages.append({"role": "assistant", "content": cleaned_reply})
+                self.session["turns"] += 1
+                self.session["out_tokens"] += len(cleaned_reply.split()) * 2
+                self.session["in_tokens"] += len(utterance.split()) * 2
+                self._dirty = False
+                self._interrupted = False
+
+                parts = [p.strip() for p in _SENTENCE_END.split(cleaned_reply) if p.strip()]
+                for sent in parts:
+                    if sent and not self._interrupted:
+                        yield sent
+                        yielded_any = True
+                if not yielded_any and not self._interrupted:
+                    yield cleaned_reply
+                return
+
+        # Step 2: Fallback stream final voice response to Kokoro TTS if multi-step forced summary is needed
         buf = ""
         full_reply = ""
         yielded_any = False

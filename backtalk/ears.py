@@ -29,6 +29,7 @@ import platform
 import re
 import sys
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -342,6 +343,19 @@ def transcribe(pcm: np.ndarray) -> str:
     return _NONSPEECH.sub("", text).strip()
 
 
+def _read_frame_safe(stream, count: int = FRAME_LEN, timeout_s: float = 1.2) -> np.ndarray | None:
+    """Read `count` samples safely with a timeout to prevent hanging if
+    the audio hardware or driver stalls."""
+    t0 = time.monotonic()
+    while stream.read_available < count:
+        time.sleep(0.005)
+        if time.monotonic() - t0 >= timeout_s:
+            log(f"[ears] audio hardware stalled: 0 frames received in {timeout_s:.1f}s")
+            return None
+    block, _ = stream.read(count)
+    return block[:, 0].copy()
+
+
 class Ears:
     def __init__(self, aggressiveness: int = 2, silence_ms: int = 480):
         self.vad = webrtcvad.Vad(aggressiveness)
@@ -364,13 +378,16 @@ class Ears:
 
         with _open_mic() as stream:
             while True:
-                block, _ = stream.read(FRAME_LEN)
+                mono = _read_frame_safe(stream, FRAME_LEN)
+                if mono is None:
+                    if abort and abort():
+                        return None
+                    continue
                 elapsed += FRAME_MS / 1000
                 if abort and abort():
                     return None
                 if timeout_s and elapsed > timeout_s and not in_utterance:
                     return None
-                mono = block[:, 0].copy()
                 if gate and gate():
                     # speakers are talking and barge-in isn't on: ignore
                     ring.clear()
@@ -404,19 +421,23 @@ class Ears:
                         return transcribe(np.concatenate(frames))
 
 
-def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None:
+def record_held(is_held, max_s: float = 60.0, min_s: float = 0.18) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
     then transcribe. The button is the VAD — no endpointing. Returns
     None for taps shorter than min_s (accidental presses)."""
     frames: list[np.ndarray] = []
     with _open_mic() as stream:
         while is_held() and len(frames) * FRAME_MS / 1000 < max_s:
-            block, _ = stream.read(FRAME_LEN)
-            frames.append(block[:, 0].copy())
+            mono = _read_frame_safe(stream, FRAME_LEN)
+            if mono is None:
+                break
+            frames.append(mono)
         # a small tail so the last word isn't clipped at release
         for _ in range(6):
-            block, _ = stream.read(FRAME_LEN)
-            frames.append(block[:, 0].copy())
+            mono = _read_frame_safe(stream, FRAME_LEN, timeout_s=0.25)
+            if mono is None:
+                break
+            frames.append(mono)
     if len(frames) * FRAME_MS / 1000 < min_s:
         return None
     try:

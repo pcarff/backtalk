@@ -67,7 +67,7 @@ from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
                            warm as warm_ears)
-from backtalk.mouth import Mouth
+from backtalk.mouth import Mouth, warm as warm_mouth
 from backtalk.ptt import PTTListener
 from backtalk.vlog import log
 
@@ -675,18 +675,13 @@ async def amain():
     log(f"[backtalk] up — agent={NAME} dir={CFG['agent_dir']} "
         f"model={brain.model} mic={mode} "
         f"(say 'goodbye {NAME.lower()}' to hang up)")
+    loop = asyncio.get_event_loop()
+    # Warm speech engines in background while brain connects
+    warm_mouth_fut = loop.run_in_executor(None, warm_mouth)
+    warm_ears_fut = loop.run_in_executor(None, warm_ears)
     mouth.say(CFG["greeting"])
 
-    loop = asyncio.get_event_loop()
-    # Warm the engines while the greeting plays: the STT model load and
-    # the brain's prompt-cache toll both hide behind the spoken line.
-    warm_ears_fut = loop.run_in_executor(None, warm_ears)
-    # THE BRAIN CONNECT, guarded. This is the one startup step that
-    # needs a signed-in Claude Code, internet, and available usage.
-    # When it fails or hangs, the mouth still works, so SAY SO instead
-    # of dying silently with the face stuck on idle (a real field
-    # case: the greeting played, then nothing, and on Windows the
-    # window closed before anyone could read the error).
+    # THE BRAIN CONNECT, guarded.
     log("[backtalk] connecting the brain...")
     try:
         await asyncio.wait_for(brain.start(), 120)
@@ -701,18 +696,18 @@ async def amain():
                 else f"failed: {e!r}"[:220])
         log(f"[backtalk] BRAIN CONNECT {kind}")
         mouth.say("Bad news. The voice and the face are fine, but I "
-                  "couldn't reach my brain, the Claude Code session. "
-                  "Check this window for the error. The usual causes: "
-                  "Claude Code isn't signed in, the internet is down, "
-                  "or the plan is out of usage.")
+                  "couldn't reach my brain, the local LLM server. "
+                  "Check this window for the error. Confirm that "
+                  "milo-llm.service is running on port 8080.")
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
     try:
+        await asyncio.wait_for(asyncio.shield(warm_mouth_fut), 60)
         await asyncio.wait_for(asyncio.shield(warm_ears_fut), 60)
-        log("[backtalk] ears warm and ready")
+        log("[backtalk] ears and voice warm and ready")
     except Exception as e:
-        log(f"[ears] warmup error: {e!r}")
+        log(f"[engines] warmup error: {e!r}")
     # the hidden warmup ping is plumbing, not conversation
     brain.session.update(turns=0, out_tokens=0, in_tokens=0, cost=0.0)
     # a configured effort level applies at launch (saved by the spoken

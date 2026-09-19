@@ -171,8 +171,8 @@ def warm():
             lang = (CFG["voice"] or "bm_lewis")[0]
             log(f"[mouth] loading kokoro (lang '{lang}', "
                 f"voice {CFG['voice']})...")
-            device = CFG.get("tts_device", "cpu")
-            _pipe = KPipeline(lang_code=lang, device=device)
+            device = CFG.get("tts_device", "cuda")
+            _pipe = KPipeline(lang_code=lang, device=device, repo_id="hexgrad/Kokoro-82M")
             log(f"[mouth] voice ready ({device})")
     return _pipe
 

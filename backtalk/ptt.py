@@ -76,14 +76,14 @@ def resolve_key(name: str):
 
 class PTTListener:
     # How long a release must stand unchallenged before it is believed.
-    # Comfortably longer than any keyboard's auto-repeat period (measured
-    # at ~50ms on the hardware that exposed this; Windows' fastest setting
-    # is ~30ms) and short enough that letting go still feels instant.
-    RELEASE_GRACE = 0.12
+    # Comfortably longer than any keyboard's auto-repeat period / debounce
+    # and short enough that letting go still feels natural.
+    RELEASE_GRACE = 0.25
 
     def __init__(self, key="home"):
         self._key = resolve_key(key) if isinstance(key, str) else key
         self._held = False
+        self._press_t = None
         self._release_t = None          # a release awaiting confirmation
         self._press_evt = threading.Event()
         self._listener = keyboard.Listener(on_press=self._on_press,
@@ -91,18 +91,42 @@ class PTTListener:
         self._listener.daemon = True
         self._listener.start()
 
+    def _matches(self, k) -> bool:
+        if k == self._key:
+            return True
+        # On Linux X11, Right Alt can report as alt_r or alt_gr
+        if self._key in (keyboard.Key.alt_r, keyboard.Key.alt_gr):
+            if k in (keyboard.Key.alt_r, keyboard.Key.alt_gr):
+                return True
+        # Left Alt can report as alt_l or alt
+        if self._key in (keyboard.Key.alt_l, keyboard.Key.alt):
+            if k in (keyboard.Key.alt_l, keyboard.Key.alt):
+                return True
+        # Ctrl aliases
+        if self._key in (keyboard.Key.ctrl_r, keyboard.Key.ctrl_l, keyboard.Key.ctrl):
+            if k in (keyboard.Key.ctrl_r, keyboard.Key.ctrl_l, keyboard.Key.ctrl):
+                return True
+        # KeyCode comparison by vk or char
+        if isinstance(self._key, keyboard.KeyCode) and isinstance(k, keyboard.KeyCode):
+            if self._key.vk is not None and self._key.vk == k.vk:
+                return True
+            if self._key.char is not None and self._key.char == k.char:
+                return True
+        return False
+
     def _on_press(self, k):
-        if k != self._key:
+        if not self._matches(k):
             return
         # A press cancels any pending release: that release was auto-repeat,
         # not a human letting go.
         self._release_t = None
         if not self._held:                      # filter key-repeat
             self._held = True
+            self._press_t = time.monotonic()
             self._press_evt.set()
 
     def _on_release(self, k):
-        if k == self._key:
+        if self._matches(k):
             # PROVISIONAL. Believed only if no press follows; see _settle().
             self._release_t = time.monotonic()
 
@@ -113,6 +137,13 @@ class PTTListener:
                 time.monotonic() - r >= self.RELEASE_GRACE:
             self._held = False
             self._release_t = None
+            self._press_t = None
+        elif self._held and self._press_t is not None and \
+                time.monotonic() - self._press_t >= 45.0:
+            # Watchdog: release key if held longer than 45s (e.g. lost X11 KeyRelease event)
+            self._held = False
+            self._release_t = None
+            self._press_t = None
 
     def wait_press(self):
         """Block until the key goes DOWN (one event per physical press)."""
