@@ -646,6 +646,97 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             _set_signal_state("thinking")
             return search_agent_memories(query, source, max_results)
 
+        elif tool_name == "inspect_image":
+            target_path = str(args.get("path") or args.get("file") or args.get("image") or "").strip()
+            user_query = str(args.get("query") or args.get("prompt") or args.get("question") or "").strip()
+            if not user_query:
+                user_query = (
+                    "Inspect and analyze this image thoroughly. Identify all hardware components, "
+                    "microcontrollers, sensors, actuators, wiring connections, pin labels, "
+                    "power rails, and any visible markings or anomalies."
+                )
+
+            # Resolve image candidate
+            candidate = None
+            if target_path and os.path.isfile(target_path):
+                candidate = target_path
+            elif target_path and os.path.isdir(target_path):
+                exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+                files = [os.path.join(target_path, f) for f in os.listdir(target_path) if f.lower().endswith(exts)]
+                if files:
+                    candidate = max(files, key=os.path.getmtime)
+            elif target_path:
+                for base in (cwd, "/workspaces/milo_pic", "/workspaces", os.path.expanduser("~/Pictures")):
+                    p = os.path.join(base, target_path)
+                    if os.path.isfile(p):
+                        candidate = p
+                        break
+
+            # Default fallback: newest file in /workspaces/milo_pic or ~/Pictures/Screenshots
+            if not candidate:
+                search_dirs = ["/workspaces/milo_pic", os.path.expanduser("~/Pictures/Screenshots"), os.path.expanduser("~/Pictures")]
+                exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+                found = []
+                for sdir in search_dirs:
+                    if os.path.isdir(sdir):
+                        try:
+                            for f in os.listdir(sdir):
+                                if f.lower().endswith(exts):
+                                    fp = os.path.join(sdir, f)
+                                    found.append((os.path.getmtime(fp), fp))
+                        except Exception:
+                            pass
+                if found:
+                    found.sort(reverse=True)
+                    candidate = found[0][1]
+
+            if not candidate or not os.path.isfile(candidate):
+                return f"Error: No image found at '{target_path}'. Please specify an image path or place images in /workspaces/milo_pic."
+
+            print(f" [MILO] 👁️ Inspecting visual telemetry: {candidate}...", flush=True)
+            _set_signal_state("thinking")
+
+            try:
+                import base64
+                with open(candidate, "rb") as f:
+                    b64_img = base64.b64encode(f.read()).decode("utf-8")
+
+                mime = "image/jpeg"
+                if candidate.lower().endswith(".png"):
+                    mime = "image/png"
+                elif candidate.lower().endswith(".webp"):
+                    mime = "image/webp"
+
+                api_url = f"{brain_ref.api_base}/chat/completions" if brain_ref else f"{CFG.get('api_base', 'http://192.168.19.197:8080/v1')}/chat/completions"
+                payload = {
+                    "model": brain_ref.model if brain_ref else "qwen",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"You are MILO, lead robotics flight director. Deliver a crisp, spoken visual briefing (under 150 words): {user_query}"
+                                },
+                                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_img}"}}
+                            ]
+                        }
+                    ],
+                    "max_tokens": 400,
+                    "temperature": 0.2
+                }
+
+                resp = httpx.post(api_url, json=payload, timeout=60.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    desc = data["choices"][0]["message"]["content"].strip()
+                    desc = _SPECIAL_TOKENS.sub("", desc).strip()
+                    return f"[Visual Analysis for {os.path.basename(candidate)}]:\n{desc}"
+                else:
+                    return f"Error: Vision inference failed with status {resp.status_code}: {resp.text}"
+            except Exception as ex:
+                return f"Error: Visual inspection failed: {ex}"
+
         return f"Unknown tool: {tool_name}"
     except Exception as e:
         return f"Tool execution failed: {e}"
@@ -656,12 +747,13 @@ TOOL_PROMPT = """
 You are MILO (Machine Intelligence Liaison Officer), lead robotics flight director.
 
 RULES:
-1. When you need to inspect directories, read code files, recall past memories, check live weather, search live news, or generate images, invoke tools using <tool_call>{"tool": "name", ...}</tool_call>.
+1. When you need to inspect directories, read code files, inspect images/hardware photos, recall past memories, check live weather, search live news, or generate images, invoke tools using <tool_call>{"tool": "name", ...}</tool_call>.
 2. `list_dir` returns the full recursive tree (all files and subfolders), so you can read target files immediately on your next step.
 3. As soon as you have inspected the necessary information or generated the asset, STOP calling tools and deliver your spoken flight director answer directly.
 4. Conclude your answer with a specific, direct question guiding the user on what action to take next.
 
 Available Tools:
+- inspect_image(path, query): Inspect, analyze, and diagnose any image, photo, screenshot, or circuit diagram. If path is omitted, automatically inspects the newest photo in /workspaces/milo_pic. Can answer specific visual questions about wiring, components, and hardware.
 - recall_memory(query, source): Recall past memories, hardware designs, user preferences, and conversation history across Antigravity, Claude Code, and the Vault. Source can be 'all', 'claude', 'antigravity', or 'vault'.
 - get_weather(location): Real-time temperature, humidity, wind, and forecast. If location is omitted, checks local station.
 - get_fox_news(category_or_topic, max_results): Live Fox News wire stories and breaking headlines. Category can be 'latest', 'politics', 'tech', 'world', or a specific topic search.
