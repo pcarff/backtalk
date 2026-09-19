@@ -1042,7 +1042,7 @@ class WarmBrain:
         full_reply = ""
         yielded_any = False
         speech_messages = self.messages + [
-            {"role": "system", "content": "You MUST deliver your spoken flight director briefing directly to the user now in natural speech. Do NOT call any tools. Do NOT output JSON, XML, or code blocks. Report your status, findings, or errors clearly and guide the user on the next step."}
+            {"role": "user", "content": "[Instruction]: You MUST deliver your spoken flight director briefing directly to the user now in natural speech. Do NOT call any tools. Do NOT output JSON, XML, or code blocks. Report your status, findings, or errors clearly and guide the user on the next step."}
         ]
         payload = {
             "model": self.model,
