@@ -63,6 +63,19 @@ backtalk writes tiny state files while it listens, thinks, and speaks, so anythi
 
 Mind ([ai-memory-vault](https://github.com/jaredrhod/ai-memory-vault)), mouth (this), face (ai-visualizer), hands (barehands).
 
+## Give it Eyes (Autonomous Optical Vision & Webcams)
+
+backtalk supports real-time computer vision through local and USB webcams:
+- **`inspect_camera(query)`:** The agent can capture a 1080p frame from your webcam, transmit it to a multimodal vision model (such as local Qwen 3.8 27B with `--mmproj` or Claude), and deliver an immediate spoken briefing.
+- **Audible mechanical shutter:** Instant audio confirmation (`camera-shutter.oga` on Linux or `afplay` on macOS) when the frame is grabbed so you know when you can put an object down.
+- **Cross-Platform Capture:**
+  - **Linux:** Uses `ffmpeg -f v4l2 -input_format mjpeg` on `/dev/video0` (or configured device) for sub-second hardware captures.
+  - **macOS:** Uses `ffmpeg -f avfoundation` on the built-in FaceTime HD camera or USB webcams.
+- **Configuration in `backtalk.json`:**
+  - `"camera_device": "/dev/video0"` (or `"default"` on macOS)
+  - `"camera_dir": "/workspaces_nvme/milo_pic"` (or `~/Pictures/milo_eyes`)
+- **Signals Bus:** Writes capture metadata to `.camera_snap` in `signals_dir` for live HUDs (like the Steampunk Viewfinder) to display in real time.
+
 ## The fine print that matters
 
 - **Usage:** every spoken turn is a real Claude Code turn, so a long voice session uses your plan the same way a long typing session does. The config pins the fast model tier on purpose; it's most of the speed, and it's the lighter draw.

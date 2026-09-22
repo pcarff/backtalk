@@ -731,6 +731,73 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
             return f"Error: Image generation completed, but expected output file {output_file} was not created."
 
+        elif tool_name == "animate_image":
+            target_image = str(args.get("image_path") or args.get("path") or args.get("image") or args.get("file") or "").strip()
+            motion_prompt = str(args.get("prompt") or args.get("motion") or args.get("description") or "").strip()
+            frames = int(args.get("frames", 33))
+            steps = int(args.get("steps", 20))
+
+            output_dir = os.path.expanduser("~/Pictures/Flux_Generations")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # If no image path provided or it's just a prompt, resolve latest generated flux image
+            candidate_img = None
+            if target_image and os.path.isfile(target_image):
+                candidate_img = target_image
+            elif target_image:
+                # Check output_dir, cwd, /workspaces/milo_pic
+                for base_dir in (output_dir, cwd, "/workspaces/milo_pic", os.path.expanduser("~/Pictures")):
+                    chk = os.path.join(base_dir, target_image)
+                    if os.path.isfile(chk):
+                        candidate_img = chk
+                        break
+
+            if not candidate_img:
+                # Pick newest PNG in output_dir
+                png_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.lower().endswith(".png")]
+                if png_files:
+                    candidate_img = max(png_files, key=os.path.getmtime)
+
+            if not candidate_img or not os.path.isfile(candidate_img):
+                return "Error: No image found to animate. Generate an image with generate_image first or specify image_path."
+
+            if not motion_prompt:
+                motion_prompt = "natural fluid movement, warm atmospheric lighting flicker, realistic physical dynamics"
+
+            print(f" [MILO] 🎬 Animating image via Wan2.1 14B: {candidate_img} (prompt: \"{motion_prompt}\", {frames} frames)...", flush=True)
+            _set_signal_state("thinking")
+
+            runner_script = "/home/pcarff/Desktop/run-wan-i2v.sh"
+            if not os.path.isfile(runner_script):
+                return "Error: Wan2.1 runner script /home/pcarff/Desktop/run-wan-i2v.sh not found."
+
+            try:
+                cmd = [runner_script, candidate_img, motion_prompt, str(frames), str(steps)]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+                if res.returncode != 0:
+                    err_snippet = res.stderr[-400:] if res.stderr else (res.stdout[-400:] if res.stdout else "Process failed")
+                    print(f" [MILO] ❌ Wan2.1 animation failed (code {res.returncode}): {err_snippet}", flush=True)
+                    return f"Error: Video generation failed (code {res.returncode}): {err_snippet}"
+
+                # Find the newest generated mp4 or webm in output_dir
+                vid_files = [
+                    os.path.join(output_dir, f)
+                    for f in os.listdir(output_dir)
+                    if f.startswith("wan_") and (f.endswith(".mp4") or f.endswith(".webm"))
+                ]
+                if vid_files:
+                    newest_vid = max(vid_files, key=os.path.getmtime)
+                    subprocess.Popen(["xdg-open", newest_vid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return (
+                        f"Success: Animated video generated successfully from {os.path.basename(candidate_img)} "
+                        f"using Wan2.1 14B ({frames} frames) and opened in media player. Saved to {newest_vid}."
+                    )
+                return "Error: Video generation completed, but output video file was not found."
+            except subprocess.TimeoutExpired:
+                return "Error: Video generation timed out after 5 minutes."
+            except Exception as ex:
+                return f"Error animating image: {ex}"
+
         elif tool_name == "recall_memory":
             query = str(args.get("query") or args.get("topic") or args.get("terms") or "").strip()
             source = str(args.get("source") or "all").strip().lower()
@@ -738,6 +805,35 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             print(f" [MILO] 🧠 Recalling cross-agent memories for '{query}' (source: {source})...", flush=True)
             _set_signal_state("thinking")
             return search_agent_memories(query, source, max_results)
+
+        elif tool_name == "inspect_camera":
+            user_query = str(args.get("query") or args.get("prompt") or args.get("question") or "").strip()
+            if not user_query:
+                user_query = (
+                    "Inspect what the user is holding up to the camera or showing you. "
+                    "Identify all visible hardware components, microcontrollers, wiring, pin markings, text, or objects."
+                )
+            print(f" [MILO] 📸 Snapping live optical telemetry via webcam...", flush=True)
+            _set_signal_state("thinking")
+            cam_dev = CFG.get("camera_device") or "/dev/video0"
+            cam_dir = CFG.get("camera_dir") or "/workspaces_nvme/milo_pic"
+            from backtalk.camera import snap_webcam_frame
+            snap_file = snap_webcam_frame(output_dir=cam_dir, device=cam_dev, query=user_query)
+            if not snap_file:
+                return "Error: Could not capture frame from optical webcam sensor. Check camera connection."
+
+            # Auto-launch or summon Steampunk Viewfinder HUD if in GUI desktop session
+            if os.environ.get("DISPLAY"):
+                try:
+                    res = subprocess.run("pgrep -f milo_viewfinder", shell=True, capture_output=True)
+                    if res.returncode != 0:
+                        vf_path = "/anzym/my-agent/milo_visualizer/milo_viewfinder.py"
+                        if os.path.isfile(vf_path):
+                            subprocess.Popen(["python3", vf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+            return execute_tool("inspect_image", {"path": snap_file, "query": user_query}, brain_ref)
 
         elif tool_name == "inspect_image":
             target_path = str(args.get("path") or args.get("file") or args.get("image") or "").strip()
@@ -749,6 +845,10 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                     "power rails, and any visible markings or anomalies."
                 )
 
+            # If user explicitly requested camera/live or omitted target, capture directly via webcam
+            if target_path in ("camera", "webcam", "live", "optical"):
+                return execute_tool("inspect_camera", {"query": user_query}, brain_ref)
+
             # Resolve image candidate
             candidate = None
             if target_path and os.path.isfile(target_path):
@@ -759,15 +859,15 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 if files:
                     candidate = max(files, key=os.path.getmtime)
             elif target_path:
-                for base in (cwd, "/workspaces/milo_pic", "/workspaces", os.path.expanduser("~/Pictures")):
+                for base in (cwd, "/workspaces_nvme/milo_pic", "/workspaces/milo_pic", "/workspaces", os.path.expanduser("~/Pictures")):
                     p = os.path.join(base, target_path)
                     if os.path.isfile(p):
                         candidate = p
                         break
 
-            # Default fallback: newest file in /workspaces/milo_pic or ~/Pictures/Screenshots
-            if not candidate:
-                search_dirs = ["/workspaces/milo_pic", os.path.expanduser("~/Pictures/Screenshots"), os.path.expanduser("~/Pictures")]
+            # Check search directories
+            if not candidate and target_path:
+                search_dirs = ["/workspaces_nvme/milo_pic", "/workspaces/milo_pic", os.path.expanduser("~/Pictures/Screenshots"), os.path.expanduser("~/Pictures")]
                 exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
                 found = []
                 for sdir in search_dirs:
@@ -783,8 +883,10 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                     found.sort(reverse=True)
                     candidate = found[0][1]
 
-            if not candidate or not os.path.isfile(candidate):
-                return f"Error: No image found at '{target_path}'. Please specify an image path or place images in /workspaces/milo_pic."
+            # If no candidate found and no target specified, snap live from webcam eyes
+            if not candidate:
+                print(" [MILO] 👁️ No local image file specified; snapping live frame from webcam eyes...", flush=True)
+                return execute_tool("inspect_camera", {"query": user_query}, brain_ref)
 
             print(f" [MILO] 👁️ Inspecting visual telemetry: {candidate}...", flush=True)
             _set_signal_state("thinking")
@@ -840,13 +942,14 @@ TOOL_PROMPT = """
 You are MILO (Machine Intelligence Liaison Officer), lead robotics flight director.
 
 RULES:
-1. When you need to inspect directories, read code files, inspect images/hardware photos, recall past memories, check live weather, search live news, or generate images, invoke tools using <tool_call>{"tool": "name", ...}</tool_call>.
+1. When you need to inspect directories, read code files, inspect images/hardware photos, capture webcam optical feeds, recall past memories, check live weather, search live news, generate images, or animate images into video, invoke tools using <tool_call>{"tool": "name", ...}</tool_call>.
 2. `list_dir` returns the full recursive tree (all files and subfolders), so you can read target files immediately on your next step.
 3. As soon as you have inspected the necessary information or generated the asset, STOP calling tools and deliver your spoken flight director answer directly.
 4. Conclude your answer with a specific, direct question guiding the user on what action to take next.
 
 Available Tools:
-- inspect_image(path, query): Inspect, analyze, and diagnose any image, photo, screenshot, or circuit diagram. If path is omitted, automatically inspects the newest photo in /workspaces/milo_pic. Can answer specific visual questions about wiring, components, and hardware.
+- inspect_camera(query): Real-time optical vision! Take a picture with your benchtop webcam (Logitech C925e) to inspect whatever the user is holding up or showing you (e.g. circuit boards, chips, wiring, pinouts, components, documents, or physical objects).
+- inspect_image(path, query): Inspect, analyze, and diagnose any image, photo, screenshot, or circuit diagram. If path is omitted or set to 'camera', automatically captures a live frame from your optical webcam.
 - recall_memory(query, source): Recall past memories, hardware designs, user preferences, and conversation history across Antigravity, Claude Code, and the Vault. Source can be 'all', 'claude', 'antigravity', or 'vault'.
 - get_weather(location): Real-time temperature, humidity, wind, and forecast. If location is omitted, checks local station.
 - get_fox_news(category_or_topic, max_results): Live Fox News wire stories and breaking headlines. Category can be 'latest', 'politics', 'tech', 'world', or a specific topic search.
@@ -860,7 +963,9 @@ Available Tools:
 - search_files(path, query): Search for files by name.
 - run_command(cmd, cwd): Execute shell commands. Note: 'arduino-cli' is installed for compiling and flashing AVR/ESP32 boards (e.g. arduino-cli compile --fqbn arduino:avr:uno <sketch_dir> && arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno <sketch_dir>).
 - generate_image(prompt): Generate an image using the FLUX.1 diffusion engine on Cortex and display it on the user's screen.
+- animate_image(image_path, prompt, frames): Animate a still image into a short cinematic video using the Wan2.1 14B Image-to-Video diffusion engine. If image_path is omitted, automatically animates the newest generated FLUX image.
 """
+
 
 
 class WarmBrain:
