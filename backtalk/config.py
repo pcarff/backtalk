@@ -279,10 +279,45 @@ def load() -> dict:
     # In hands-free there is no key to hold, so a separate line can be set.
     if str(cfg.get("mic_mode", "ptt")) == "open" and cfg.get("greeting_open_mic"):
         cfg["greeting"] = cfg["greeting_open_mic"]
-    cfg["greeting"] = str(cfg["greeting"]).replace(
-        "{name}", name).replace("{ptt_key}", key_label)
-    cfg["signoff"] = str(cfg["signoff"]).replace("{name}", name)
+    daypart = _daypart()
+    cfg["greeting"] = _pick("greeting", cfg["greeting"]).replace(
+        "{name}", name).replace("{ptt_key}", key_label).replace("{daypart}", daypart)
+    cfg["signoff"] = _pick("signoff", cfg["signoff"]).replace(
+        "{name}", name).replace("{daypart}", daypart)
     return cfg
+
+
+_LAST_LINES = Path.home() / ".local" / "state" / "backtalk" / "last_lines.json"
+
+
+def _daypart() -> str:
+    from datetime import datetime
+    h = datetime.now().hour
+    return "morning" if 4 <= h < 12 else "afternoon" if h < 17 else "evening"
+
+
+def _pick(key: str, value) -> str:
+    """greeting/signoff may be one string or a list; a list gets a random
+    line, never the same one twice in a row."""
+    if not isinstance(value, list):
+        return str(value)
+    lines = [str(v) for v in value if str(v).strip()]
+    if not lines:
+        return ""
+    import random
+    try:
+        last = json.loads(_LAST_LINES.read_text()).get(key)
+    except (OSError, ValueError):
+        last = None
+    choice = random.choice([l for l in lines if l != last] or lines)
+    try:
+        state = json.loads(_LAST_LINES.read_text()) if _LAST_LINES.exists() else {}
+        state[key] = choice
+        _LAST_LINES.parent.mkdir(parents=True, exist_ok=True)
+        _LAST_LINES.write_text(json.dumps(state))
+    except (OSError, ValueError):
+        pass
+    return choice
 
 
 CFG = load()

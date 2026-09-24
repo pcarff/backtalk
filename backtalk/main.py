@@ -742,6 +742,30 @@ async def amain():
             time.sleep(0.08)
 
     threading.Thread(target=_file_typed_reader, args=(typed_q,), daemon=True).start()
+
+    def _file_say_reader():
+        """Speak text dropped on the signal bus (.say) verbatim, no LLM turn.
+        Used by milo-remind; waits for MILO to finish her current sentence
+        (up to 20 s) so a reminder doesn't cut into a reply."""
+        say_p = os.path.join(CFG.get("signals_dir", "/dev/shm/signals"), ".say")
+        while True:
+            try:
+                if os.path.exists(say_p):
+                    with open(say_p, "r", encoding="utf-8") as f:
+                        text = f.read().strip()
+                    os.remove(say_p)
+                    if text:
+                        waited = 0.0
+                        while mouth.speaking and waited < 20:
+                            time.sleep(0.25)
+                            waited += 0.25
+                        log(f"[signals] say: {text}")
+                        mouth.say(text)
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    threading.Thread(target=_file_say_reader, daemon=True).start()
     typed_fut: asyncio.Future | None = None
 
     async def run_console(verb):

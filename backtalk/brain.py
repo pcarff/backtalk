@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import re
+import socket
 import subprocess
 import httpx
 from pathlib import Path
@@ -60,6 +61,64 @@ PROJECT_ALIASES = {
     "vault": "/anzym/my-agent/vault",
     "memory": "/anzym/my-agent/vault",
 }
+
+# Tool-loop limits, loosened for hardware work (flashing, serial, ROS checks).
+MAX_TOOL_TURNS = int(CFG.get("max_tool_turns", 8))
+RUN_COMMAND_TIMEOUT = int(CFG.get("run_command_timeout", 90))
+RUN_COMMAND_MAX_OUTPUT = int(CFG.get("run_command_max_output", 4000))
+
+# Helper commands MILO can call through run_command. Any executable here with a
+# "# milo-tool: <description>" line is listed in her system prompt at startup.
+# Lives beside backtalk: /anzym/my-agent/milo-tools on Cortex, ~/my-agent/milo-tools on synapse.
+_DEFAULT_TOOLS_DIR = Path(__file__).resolve().parents[2] / "milo-tools"
+MILO_TOOLS_DIR = Path(os.path.expanduser(CFG.get("milo_tools_dir") or str(_DEFAULT_TOOLS_DIR)))
+# Tools tagged "# milo-host: cortex" drive Cortex's own hardware (ADK, GPU, X11 screen,
+# PipeWire audio). On any other machine they're offered as `ssh cortex <tool>`.
+HOME_HOST = str(CFG.get("home_host", "cortex"))
+HOME_TOOLS_DIR = str(CFG.get("home_tools_dir", "/anzym/my-agent/milo-tools"))
+_HOSTNAME = socket.gethostname().split(".")[0]
+# run_command finds the tools by name on every machine, synced ~/.local/bin or not.
+os.environ["PATH"] = f"{MILO_TOOLS_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+def _load_milo_tools() -> str:
+    here = socket.gethostname().split(".")[0].lower()
+    local, remote = [], []
+    if MILO_TOOLS_DIR.is_dir():
+        for tool in sorted(MILO_TOOLS_DIR.iterdir()):
+            if not (tool.is_file() and os.access(tool, os.X_OK)):
+                continue
+            try:
+                with open(tool, encoding="utf-8", errors="ignore") as f:
+                    head = [next(f, "") for _ in range(5)]
+            except OSError:
+                continue
+            desc = next((l.split(":", 1)[1].strip() for l in head if l.startswith("# milo-tool:")), None)
+            host = next((l.split(":", 1)[1].strip().lower() for l in head if l.startswith("# milo-host:")), None)
+            if not desc:
+                continue
+            if host and host != here:
+                remote.append(f"- `ssh {host} {HOME_TOOLS_DIR}/{tool.name}`: {desc}")
+            else:
+                local.append(f"- `{tool.name}`: {desc}")
+    if not local and not remote:
+        return ""
+    log(f"[brain] loaded {len(local)} local + {len(remote)} remote command(s) from {MILO_TOOLS_DIR}")
+    text = "### Local Hardware Commands (run via run_command; each takes --help)\n" + "\n".join(local)
+    if remote:
+        text += (f"\n\n### {HOME_HOST.title()} Commands (you are on {here}; these run on {HOME_HOST} over "
+                 f"Tailscale SSH — the bench hardware, GPU and office desktop live there)\n" + "\n".join(remote))
+    return text
+
+
+def _hardware_summary() -> str:
+    """One-line list of attached serial/USB hardware for per-turn telemetry."""
+    try:
+        res = subprocess.run([str(MILO_TOOLS_DIR / "milo-devices"), "--brief"],
+                             capture_output=True, text=True, timeout=3)
+        return res.stdout.strip()
+    except Exception:
+        return ""
 
 
 def _set_signal_state(state: str):
@@ -617,9 +676,17 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             print(f" [MILO] ⚙️ Running command: $ {cmd} (in {target_cwd})...", flush=True)
             _set_signal_state("thinking")
             try:
-                res = subprocess.run(cmd, shell=True, cwd=target_cwd, capture_output=True, text=True, timeout=30)
+                res = subprocess.run(cmd, shell=True, cwd=target_cwd, capture_output=True, text=True,
+                                     timeout=RUN_COMMAND_TIMEOUT)
                 out = res.stdout if res.stdout else res.stderr
-                return f"Command output ($ {cmd} in {target_cwd}):\n{out[:2000]}"
+                if len(out) > RUN_COMMAND_MAX_OUTPUT:
+                    # Keep both ends: errors and summaries usually land at the tail.
+                    half = RUN_COMMAND_MAX_OUTPUT // 2
+                    out = f"{out[:half]}\n... [{len(out) - RUN_COMMAND_MAX_OUTPUT} chars omitted] ...\n{out[-half:]}"
+                return f"Command output ($ {cmd} in {target_cwd}, exit {res.returncode}):\n{out}"
+            except subprocess.TimeoutExpired:
+                return (f"Command timed out after {RUN_COMMAND_TIMEOUT}s: {cmd}. If it streams forever "
+                        f"(serial port, ros2 topic echo), use a bounded form like milo-serial or --once.")
             except Exception as e:
                 return f"Command execution failed: {e}"
 
@@ -962,6 +1029,7 @@ Available Tools:
 - write_file(path, content): Create or overwrite a source file, Arduino sketch, or configuration file directly without shell escaping issues.
 - search_files(path, query): Search for files by name.
 - run_command(cmd, cwd): Execute shell commands. Note: 'arduino-cli' is installed for compiling and flashing AVR/ESP32 boards (e.g. arduino-cli compile --fqbn arduino:avr:uno <sketch_dir> && arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno <sketch_dir>).
+  Hardware the user plugs in (USB serial, Arduino, dev boards) and Bluetooth devices are attached to the machine run_command executes on (named in the [Hardware on ...] line every message includes). Never tell the user you can't reach a device until you have checked with run_command (e.g. `milo-devices`). Prefer the Local Hardware Commands below over improvising a protocol.
 - generate_image(prompt): Generate an image using the FLUX.1 diffusion engine on Cortex and display it on the user's screen.
 - animate_image(image_path, prompt, frames): Animate a still image into a short cinematic video using the Wan2.1 14B Image-to-Video diffusion engine. If image_path is omitted, automatically animates the newest generated FLUX image.
 """
@@ -987,6 +1055,9 @@ class WarmBrain:
         try:
             now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
             time_header = f"\n[Current Time: {now_str}] [Station: Moncks Corner / Charleston, SC]\n"
+            hardware = _hardware_summary()
+            if hardware:
+                time_header += f"[Hardware on {_HOSTNAME}: {hardware}]\n"
             cwd = self.active_project_dir
             if not os.path.exists(cwd):
                 return time_header
@@ -1003,7 +1074,10 @@ class WarmBrain:
     def _load_system_prompt(self) -> str:
         agent_dir = Path(os.path.expanduser(CFG.get("agent_dir", "/anzym/my-agent")))
         prompt_parts = [DISCIPLINE, TOOL_PROMPT]
-        
+        milo_tools = _load_milo_tools()
+        if milo_tools:
+            prompt_parts.append(milo_tools)
+
         for filename in ("AGENT.md", "CLAUDE.md", "SYSTEM.md"):
             p = agent_dir / filename
             if p.exists():
@@ -1113,8 +1187,8 @@ class WarmBrain:
             user_msg = f"{utterance}\n\n[Active Workspace Telemetry]:{snapshot}"
         self.messages.append({"role": "user", "content": user_msg})
 
-        # Step 1: Multi-turn tool execution loop (up to 5 sequential tool calls)
-        max_tool_turns = 5
+        # Step 1: Multi-turn tool execution loop
+        max_tool_turns = MAX_TOOL_TURNS
         for turn_idx in range(max_tool_turns):
             reply = await self._query_llm(self.messages)
             parsed = parse_tool_call(reply)
@@ -1125,7 +1199,8 @@ class WarmBrain:
             tool_name, args = parsed
             log(f"[brain] intercepted tool call ({turn_idx+1}/{max_tool_turns}): {tool_name} with args {args}")
 
-            tool_result = execute_tool(tool_name, args, self)
+            # Off the event loop: hardware commands can run for a minute or more.
+            tool_result = await asyncio.to_thread(execute_tool, tool_name, args, self)
             log(f"[brain] tool output ({len(tool_result)} chars):\n{tool_result[:300]}...")
 
             self.messages.append({"role": "assistant", "content": reply})
