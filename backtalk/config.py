@@ -112,6 +112,9 @@ DEFAULTS = {
     # tts_first_chars (sooner audio); later ones at tts_chunk_chars.
     "tts_first_chars": 80,
     "tts_chunk_chars": 240,
+    # Nicknames the agent calls you. Kokoro drops the comma before them so
+    # "right now, boss, with" doesn't get a stark pause before "boss".
+    "tts_soft_vocatives": ["boss", "chief", "skip"],
     # Resume the previous conversation on launch. OFF by default: a
     # fresh session every launch is the predictable behavior. Set true
     # and backtalk saves the session id after every completed turn

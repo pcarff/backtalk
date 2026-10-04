@@ -182,9 +182,23 @@ def split_sentences(text: str) -> list[str]:
     return parts or ([text.strip()] if text.strip() else [])
 
 
+def soften_vocatives(text: str) -> str:
+    """Drop the comma before a nickname ("right now, boss, with" -> "right
+    now boss, with"). Kokoro gives every comma a full pause, which makes a
+    spoken nickname sound stark; people run it into the sentence. Only
+    matches when punctuation or the end follows, so the verb "skip the
+    step" is untouched."""
+    names = CFG.get("tts_soft_vocatives") or []
+    if not names:
+        return text
+    pat = r",\s+(" + "|".join(re.escape(n) for n in names) + r")\b(?=\s*[,.!?;:]|\s*$)"
+    return re.sub(pat, r" \1", text, flags=re.IGNORECASE)
+
+
 def _stream_kokoro(text: str):
     """One sentence -> int16 PCM chunks at 24kHz, in-process."""
     pipe = warm()
+    text = soften_vocatives(text)
     try:
         speed = float(CFG.get("speed") or 1.0)
     except (TypeError, ValueError):
