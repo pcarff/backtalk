@@ -4,11 +4,13 @@
 filesystem and web tools with recursive tree awareness, guaranteeing spoken output to Kokoro TTS.
 """
 import asyncio
+import base64
 import json
 import os
 import re
 import socket
 import subprocess
+import time
 import httpx
 from pathlib import Path
 from datetime import datetime
@@ -1036,11 +1038,126 @@ Available Tools:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Brain profiles: local (OpenAI-compatible) / Claude (Anthropic) / Gemini
+# ---------------------------------------------------------------------------
+def _brain_profiles() -> dict:
+    return CFG.get("brain_profiles", {}) or {}
+
+
+def _active_brain_name() -> str:
+    return CFG.get("active_brain", "local")
+
+
+def _profile_for(name: str) -> dict:
+    profs = _brain_profiles()
+    if name in profs:
+        return profs[name]
+    # Fall back to the legacy flat config for "local"
+    return {
+        "api_base": CFG.get("api_base", "http://127.0.0.1:8080/v1"),
+        "model": CFG.get("model", "qwen3.8-27b"),
+        "provider": "openai",
+    }
+
+
+def _gemini_access_token(creds_file: str) -> str:
+    """Read a Gemini OAuth token, refreshing via the refresh_token when expired."""
+    path = Path(os.path.expanduser(creds_file))
+    if not path.exists():
+        raise RuntimeError(f"Gemini creds file missing: {creds_file}")
+    data = json.loads(path.read_text())
+    token = data.get("access_token")
+    expiry = data.get("expiry_date")
+    # expiry_date is epoch MILLISECONDS for the Gemini CLI creds
+    if expiry:
+        exp_s = float(expiry) / 1000.0 if float(expiry) > 1e12 else float(expiry)
+        if time.time() < exp_s - 60:
+            return token
+    # Need a refresh
+    refresh = data.get("refresh_token")
+    if not refresh:
+        raise RuntimeError("Gemini token expired and no refresh_token present")
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or data.get("client_id")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or data.get("client_secret")
+    if not client_id or not client_secret:
+        raise RuntimeError(
+            "Gemini token expired and no client_id/client_secret available "
+            "(set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET)."
+        )
+    resp = httpx.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh,
+            "grant_type": "refresh_token",
+        },
+        timeout=30.0,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini token refresh failed: {resp.status_code} {resp.text[:200]}")
+    tok = resp.json()
+    data["access_token"] = tok["access_token"]
+    # Preserve the original unit (milliseconds) so the file stays consistent.
+    base_ms = float(expiry) if (expiry and float(expiry) > 1e12) else time.time() * 1000.0
+    data["expiry_date"] = int(base_ms + int(tok.get("expires_in", 3600)) * 1000)
+    if "refresh_token" in tok:
+        data["refresh_token"] = tok["refresh_token"]
+    path.write_text(json.dumps(data, indent=2))
+    return data["access_token"]
+
+
+def _claude_auth_headers(creds_file: str) -> dict:
+    """Build Anthropic auth headers from the Claude CLI OAuth credentials."""
+    path = Path(os.path.expanduser(creds_file))
+    headers = {"anthropic-version": "2023-06-01"}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            oauth = data.get("claudeAiOauth", {}) or {}
+            # The CLI stores an access token under a nested key; try common shapes.
+            tok = None
+            for k in ("accessToken", "access_token", "token"):
+                if isinstance(oauth, dict) and oauth.get(k):
+                    tok = oauth[k]
+                    break
+            if tok:
+                headers["Authorization"] = f"Bearer {tok}"
+                return headers
+        except Exception as e:
+            log(f"[brain] could not parse Claude creds: {e}")
+    # Fallback to env var if present
+    env_key = os.environ.get("ANTHROPIC_API_KEY")
+    if env_key:
+        headers["x-api-key"] = env_key
+    return headers
+
+
+def _split_messages(messages: list):
+    """Split OpenAI-style messages into (system, turns) for Anthropic/Gemini."""
+    system_parts = []
+    turns = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "system":
+            system_parts.append(content)
+        elif role in ("user", "assistant"):
+            turns.append({"role": role, "content": content})
+    return "\n\n".join(system_parts), turns
+
+
 class WarmBrain:
     def __init__(self, model: str | None = None, can_use_tool=None,
                  resume_id: str | None = None):
-        self.api_base = CFG.get("api_base", "http://127.0.0.1:8080/v1")
-        self.model = model or CFG.get("model", "qwen3.8-27b")
+        self.brain_name = _active_brain_name()
+        prof = _profile_for(self.brain_name)
+        self.provider = prof.get("provider", "openai")
+        self.api_base = prof.get("api_base", CFG.get("api_base", "http://127.0.0.1:8080/v1"))
+        self.model = model or prof.get("model", CFG.get("model", "qwen3.8-27b"))
+        self._creds_file = prof.get("creds_file")
         self.active_project_dir = get_default_workspace()
         self._can_use_tool = can_use_tool
         self.session = {"turns": 0, "out_tokens": 0, "in_tokens": 0, "cost": 0.0}
@@ -1112,7 +1229,7 @@ class WarmBrain:
         self.messages = [{"role": "system", "content": full_prompt}]
         self._dirty = False
         self._interrupted = False
-        log(f"[brain] local brain connected to {self.api_base} (model={self.model}, cwd={self.active_project_dir})")
+        log(f"[brain] brain connected: provider={self.provider} base={self.api_base} model={self.model} cwd={self.active_project_dir}")
 
     async def stop(self):
         self.messages.clear()
@@ -1153,6 +1270,20 @@ class WarmBrain:
         elif verb == "/model" and len(parts) > 1:
             self.model = parts[1]
             return f"Switched model to {self.model}."
+        elif verb == "/brain" and len(parts) > 1:
+            name = parts[1].lower()
+            profs = _brain_profiles()
+            if name not in profs:
+                avail = ", ".join(profs.keys()) or "local"
+                return f"Unknown brain {name}. Available: {avail}"
+            prof = profs[name]
+            self.brain_name = name
+            self.provider = prof.get("provider", "openai")
+            self.api_base = prof.get("api_base", self.api_base)
+            self.model = prof.get("model", self.model)
+            self._creds_file = prof.get("creds_file")
+            log(f"[brain] switched to {name} (provider={self.provider}, model={self.model})")
+            return f"Switched brain to {name}."
         elif verb == "/effort":
             return "Effort level updated."
         elif verb in ("/cd", "/workspace") and len(parts) > 1:
@@ -1161,7 +1292,13 @@ class WarmBrain:
         return f"Command acknowledged: {cmd}"
 
     async def _query_llm(self, messages: list) -> str:
-        """Non-streaming query for tool decision."""
+        """Non-streaming query for tool decision. Provider-aware."""
+        if self.provider == "anthropic":
+            return await self._query_anthropic(messages)
+        if self.provider == "gemini":
+            return await self._query_gemini(messages)
+        if self.provider in ("agy", "claude_cli"):
+            return await self._query_cli(messages)
         payload = {
             "model": self.model,
             "messages": messages,
@@ -1175,6 +1312,133 @@ class WarmBrain:
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
             return ""
+
+    async def _query_anthropic(self, messages: list) -> str:
+        system, turns = _split_messages(messages)
+        body = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "temperature": 0.3,
+            "messages": turns,
+        }
+        if system:
+            body["system"] = system
+        headers = _claude_auth_headers(self._creds_file) if self._creds_file else {"anthropic-version": "2023-06-01"}
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(self.api_base, json=body, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+                    return "".join(parts)
+                log(f"[brain] anthropic error {resp.status_code}: {resp.text[:300]}")
+        except Exception as e:
+            log(f"[brain] anthropic query failed: {e}")
+        return ""
+
+    async def _query_gemini(self, messages: list) -> str:
+        system, turns = _split_messages(messages)
+        contents = []
+        for t in turns:
+            role = "model" if t["role"] == "assistant" else "user"
+            contents.append({"role": role, "parts": [{"text": t["content"]}]})
+        url = f"{self.api_base}/models/{self.model}:generateContent"
+        body = {"contents": contents}
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        try:
+            token = _gemini_access_token(self._creds_file) if self._creds_file else ""
+            headers = {"x-goog-api-key": token} if token else {}
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    cands = data.get("candidates", [])
+                    if cands:
+                        parts = cands[0].get("content", {}).get("parts", [])
+                        return "".join(pt.get("text", "") for pt in parts)
+                log(f"[brain] gemini error {resp.status_code}: {resp.text[:300]}")
+        except Exception as e:
+            log(f"[brain] gemini query failed: {e}")
+        return ""
+
+
+    async def _query_cli(self, messages: list) -> str:
+        """Query a local agent CLI (agy or claude) in print mode.
+
+        Both CLIs manage their own login, so no creds_file is needed. We pass
+        the conversation as one prompt and ask for a plain-text reply with no
+        tool execution, keeping backtalk in control of tool dispatch.
+        """
+        system, turns = _split_messages(messages)
+        # Stay neutral here: this same call makes the tool decision, so it must
+        # not forbid the JSON tool-call format from the system prompt. The
+        # speech pass appends its own "no tools" instruction. The CLI's
+        # built-in tools are still off-limits so dispatch stays in backtalk.
+        tail = ("(Reply now as the Assistant, following the [System] rules: "
+                "either one tool call in the documented format, or your spoken "
+                "answer as plain text. Never use your own built-in tools.)")
+        # agy only takes the prompt as an argv string and Linux caps one
+        # argument at 128 KiB, so keep the system prompt plus the newest
+        # turns that fit.
+        budget = 120_000 - len(tail)
+        head = f"[System] {system}"[:60_000] if system else ""
+        budget -= len(head)
+        kept = []
+        for t in reversed(turns):
+            who = "Assistant" if t["role"] == "assistant" else "User"
+            line = f"{who}: {t['content']}"
+            if len(line) + 2 > budget:
+                break
+            kept.append(line)
+            budget -= len(line) + 2
+        lines = ([head] if head else []) + list(reversed(kept)) + [tail]
+        prompt = "\n\n".join(lines)
+        if self.provider == "claude_cli":
+            argv = [self.api_base or "claude", "-p", "--output-format", "json",
+                    "--tools", ""]
+            if self.model:
+                argv += ["--model", self.model]
+            stdin_data = prompt.encode("utf-8")
+        else:
+            argv = [self.api_base or "agy", "-p", prompt, "--output-format", "json"]
+            stdin_data = None
+        name = self.provider
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE if stdin_data else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(stdin_data), timeout=120.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                log(f"[brain] {name} query timed out after 120s")
+                return ""
+            text = out.decode("utf-8", errors="replace").strip()
+            if not text:
+                log(f"[brain] {name} empty output, stderr: {err.decode('utf-8', errors='replace')[:300]}")
+                return ""
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                return text
+            if not isinstance(data, dict):
+                return str(data)
+            if self.provider == "claude_cli":
+                if data.get("is_error"):
+                    log(f"[brain] claude error: {str(data.get('result', ''))[:200]}")
+                    return ""
+                return data.get("result", "")
+            if data.get("status") and data["status"] != "SUCCESS":
+                log(f"[brain] agy status {data.get('status')}: {str(data.get('error') or data.get('response', ''))[:200]}")
+                return ""
+            return data.get("response", "")
+        except Exception as e:
+            log(f"[brain] {name} query failed: {e}")
+        return ""
 
     async def ask_stream(self, utterance: str):
         self._dirty = True
@@ -1247,6 +1511,31 @@ class WarmBrain:
         speech_messages = self.messages + [
             {"role": "user", "content": "[Instruction]: You MUST deliver your spoken flight director briefing directly to the user now in natural speech. Do NOT call any tools. Do NOT output JSON, XML, or code blocks. Report your status, findings, or errors clearly and guide the user on the next step."}
         ]
+
+        # Provider-aware: Claude and Gemini don't stream OpenAI-style SSE here,
+        # so we do a single non-streaming call and chunk the reply for TTS.
+        if self.provider in ("anthropic", "gemini", "agy", "claude_cli"):
+            final_text = await self._query_llm(speech_messages)
+            if final_text:
+                cleaned = _clean_text(final_text)
+                self.messages.append({"role": "assistant", "content": cleaned})
+                self.session["turns"] += 1
+                self.session["out_tokens"] += len(cleaned.split()) * 2
+                self.session["in_tokens"] += len(utterance.split()) * 2
+                self._dirty = False
+                self._interrupted = False
+                parts = [s.strip() for s in _SENTENCE_END.split(cleaned) if s.strip()]
+                for sent in parts:
+                    if sent and not self._interrupted:
+                        yield sent
+                        yielded_any = True
+                if not yielded_any and not self._interrupted:
+                    yield cleaned
+            else:
+                yield f"I lost connection to the {self.provider} brain."
+                self._dirty = False
+            return
+
         payload = {
             "model": self.model,
             "messages": speech_messages,

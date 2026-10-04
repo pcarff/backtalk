@@ -308,6 +308,13 @@ CONSOLE_VERBS = {
                   "slash model deep"),
     "fast":      ("switch to the fast model", "use the fast model",
                   "back to the fast model", "slash model fast"),
+    "brain":     ("switch brain to", "switch the brain to",
+                  "use brain", "slash brain",
+                  "switch to agy", "use agy", "switch to antigravity",
+                  "use antigravity", "use anti gravity",
+                  "switch to gemini", "use gemini",
+                  "switch to claude", "switch to cloud",
+                  "switch to local", "switch to the local brain"),
     "usage":     ("usage report", "slash usage"),
     "micopen":   ("go hands free", "hands free mode",
                   "hands free listening", "open mic", "open the mic"),
@@ -335,6 +342,10 @@ def console_match(text):
     for verb, phrases in CONSOLE_VERBS.items():
         if norm in phrases:
             return verb
+        # Prefix match for verbs that take a target (e.g. "switch brain to gemini")
+        for phrase in phrases:
+            if norm.startswith(phrase + " "):
+                return verb
     for lvl in _EFFORTS:
         if norm in (f"set effort to {lvl}", f"effort {lvl}",
                     f"slash effort {lvl}"):
@@ -768,22 +779,23 @@ async def amain():
     threading.Thread(target=_file_say_reader, daemon=True).start()
     typed_fut: asyncio.Future | None = None
 
-    async def run_console(verb):
+    async def run_console(verb, text=""):
         """One voice-console verb. The current reply was already
         cancelled and awaited by handle(); the pipe gets drained here
         before the command goes out. A verb that blows up must never
         take the whole voice session down with it."""
         try:
-            await _run_console_inner(verb)
+            await _run_console_inner(verb, text)
         except Exception as e:
             log(f"[console] {verb} failed: {e}")
             mouth.say("That command hit an error. Check the log.")
             signals.set_state("idle")
 
-    async def _run_console_inner(verb):
+    async def _run_console_inner(verb, text=""):
         _deny_pending()
         await brain.reset_turn()
         say_after = None
+        resp = ""
         if verb == "clear":
             resp = await brain.command("/clear")
             say_after = "Cleared. Fresh slate."
@@ -800,6 +812,32 @@ async def amain():
         elif verb == "fast":
             resp = await brain.command(f"/model {CFG['model']}")
             say_after = "Back on the fast model."
+        elif verb == "brain":
+            # The phrase carries the target: "switch brain to <name>".
+            target = None
+            profs = CFG.get("brain_profiles", {}) or {}
+            # Whisper hears the names many ways ("anti-gravity", "cloud").
+            norm = re.sub(r"[^a-z ]", " ", text.lower())
+            norm = " " + re.sub(r"\s+", " ", norm).strip() + " "
+            aliases = {
+                "agy": ("agy", "antigravity", "anti gravity", "gemini"),
+                "claude": ("claude", "cloud", "clawed", "anthropic"),
+                "local": ("local", "qwen", "quen", "home brain"),
+            }
+            for name in profs:
+                words = aliases.get(name.lower(), ()) + (name.lower(),)
+                if any(f" {w} " in norm for w in words):
+                    target = name
+                    break
+            if target is None:
+                say_after = ("I need a name. Say switch brain to local, "
+                             "switch brain to Claude, or switch brain to agy.")
+            else:
+                mouth.say(f"Switching brain to {target}.")
+                resp = await brain.command(f"/brain {target}")
+                saved = _write_config_key("active_brain", target)
+                note = "and saved as your default." if saved else "for this session."
+                say_after = f"Brain switched to {target}, {note}"
         elif verb.startswith("effort:"):
             lvl = verb.split(":", 1)[1]
             resp = await brain.command(f"/effort {lvl}")
@@ -969,7 +1007,7 @@ async def amain():
             speak_task = None
         verb = verb or console_match(text)
         if verb:
-            await run_console(verb)
+            await run_console(verb, text)
             return True
         signals.set_state("thinking")
         signals.static_start()
