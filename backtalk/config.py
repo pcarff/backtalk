@@ -107,6 +107,11 @@ DEFAULTS = {
     # (roughly 0.7 to 1.5). ElevenLabs pace lives in the master chain's
     # atempo instead. (Grew out of a community proposal, issue #1.)
     "speed": 1.0,
+    # TTS chunk sizes in characters. Every TTS request resets intonation,
+    # so bigger chunks flow better. The first chunk ships at
+    # tts_first_chars (sooner audio); later ones at tts_chunk_chars.
+    "tts_first_chars": 80,
+    "tts_chunk_chars": 240,
     # Resume the previous conversation on launch. OFF by default: a
     # fresh session every launch is the predictable behavior. Set true
     # and backtalk saves the session id after every completed turn

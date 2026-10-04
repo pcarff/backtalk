@@ -352,9 +352,17 @@ class Mouth:
         return self._speaking.is_set()
 
     def say(self, text: str):
-        """Queue text (split to sentences) for speech."""
+        """Queue text for speech, grouping sentences into breaths of about
+        tts_chunk_chars so the voice flows instead of resetting per sentence."""
+        limit = int(CFG.get("tts_chunk_chars", 240))
+        batch = ""
         for s in split_sentences(text):
-            self._q.put((s, None))
+            batch = f"{batch} {s}".strip()
+            if len(batch) >= limit:
+                self._q.put((batch, None))
+                batch = ""
+        if batch:
+            self._q.put((batch, None))
 
     def say_chunk(self, text: str, directions=None):
         """Queue text as ONE TTS request, no sentence splitting — fuller

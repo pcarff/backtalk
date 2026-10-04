@@ -591,10 +591,15 @@ def _typed_reader(q: "queue.Queue[str]"):
                 sys.stdout.flush()
 
 
+FIRST_CHARS = int(CFG.get("tts_first_chars", 80))
+CHUNK_CHARS = int(CFG.get("tts_chunk_chars", 240))
+
+
 async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
-    """First sentence ships alone (fast start); the rest go in
-    2-sentence breaths — fuller chunks get livelier prosody (single
-    short sentences come out flat)."""
+    """The opening ships as soon as it reaches tts_first_chars (fast
+    start); the rest go in breaths of about tts_chunk_chars. Fuller
+    chunks get smoother, livelier prosody: every TTS request resets the
+    intonation, so short chunks sound choppy."""
     t0 = time.time()
     first = True
     batch: list[str] = []
@@ -617,19 +622,15 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         s = " ".join(raw.replace("`", "").split()).strip()
         if not s:
             return
-        if first:
-            log(f"[{NAME}] ({time.time()-t0:.1f}s to first) {s}"
-                + (f"  <directions: {pending}>" if pending else ""))
-            mouth.say_chunk(s, pending)
+        log(f"[{NAME}] {s}" + (f"  <directions: {pending}>" if pending else ""))
+        batch.append(s)
+        if len(" ".join(batch)) >= (FIRST_CHARS if first else CHUNK_CHARS):
+            if first:
+                log(f"[{NAME}] ({time.time()-t0:.1f}s to first chunk)")
+            mouth.say_chunk(" ".join(batch), pending)
             pending = []
+            batch = []
             first = False
-        else:
-            log(f"[{NAME}] {s}" + (f"  <directions: {pending}>" if pending else ""))
-            batch.append(s)
-            if len(batch) >= 2:
-                mouth.say_chunk(" ".join(batch), pending)
-                pending = []
-                batch = []
 
     try:
         async for sentence in brain.ask_stream(text):
@@ -637,6 +638,7 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         if batch:
             mouth.say_chunk(" ".join(batch), pending)
             pending = []
+            first = False
         if first:
             # Zero sentences yielded (brain error / empty turn): nothing
             # will ever dequeue, so nothing resets the bus — park it here.
