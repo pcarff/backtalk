@@ -1,6 +1,6 @@
-"""MILO Optical Vision Sensor (Webcam Hardware Capture & Audio Shutter).
+"""ASTRA Optical Vision Sensor (Webcam Hardware Capture & Audio Shutter).
 
-Enables autonomous computer vision for MILO via Linux V4L2 webcams (e.g. Logitech C925e)
+Enables autonomous computer vision for ASTRA via Linux V4L2 webcams (e.g. Logitech C925e)
 and macOS AVFoundation cameras (e.g. MacBook built-in FaceTime HD camera),
 with high-speed 1080p frame grabbing and audible mechanical shutter feedback.
 """
@@ -50,7 +50,7 @@ def get_camera_device(preferred: str | None = None) -> str:
     if preferred and os.path.exists(preferred):
         return preferred
 
-    env_dev = os.environ.get("MILO_CAMERA")
+    env_dev = os.environ.get("ASTRA_CAMERA")
     if env_dev and os.path.exists(env_dev):
         return env_dev
 
@@ -142,7 +142,7 @@ def snap_webcam_frame(
     Returns the path to the newly captured image file, or None on failure.
     """
     if not output_dir:
-        for candidate_dir in ["/workspaces_nvme/milo_pic", os.path.expanduser("~/Pictures/milo_eyes")]:
+        for candidate_dir in ["/workspaces_nvme/astra_pic", os.path.expanduser("~/Pictures/astra_eyes")]:
             try:
                 os.makedirs(candidate_dir, exist_ok=True)
                 output_dir = candidate_dir
@@ -177,10 +177,10 @@ def snap_webcam_frame(
             res = subprocess.run(cmd, capture_output=True, timeout=7)
             if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 1000:
                 notify_camera_signal(out_file, query=query, status="analyzing")
-                print(f" [MILO] 📸 Frame snapped: {out_file} (macOS AVFoundation)")
+                print(f" [ASTRA] 📸 Frame snapped: {out_file} (macOS AVFoundation)")
                 return out_file
         except Exception as e:
-            print(f" [MILO] ⚠️ macOS AVFoundation ffmpeg error: {e}")
+            print(f" [ASTRA] ⚠️ macOS AVFoundation ffmpeg error: {e}")
 
         # Fallback for macOS: imagesnap if installed via homebrew
         if shutil.which("imagesnap"):
@@ -188,7 +188,7 @@ def snap_webcam_frame(
                 res = subprocess.run(["imagesnap", "-w", "0.8", out_file], capture_output=True, timeout=6)
                 if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 1000:
                     notify_camera_signal(out_file, query=query, status="analyzing")
-                    print(f" [MILO] 📸 Frame snapped: {out_file} (imagesnap)")
+                    print(f" [ASTRA] 📸 Frame snapped: {out_file} (imagesnap)")
                     return out_file
             except Exception:
                 pass
@@ -198,7 +198,7 @@ def snap_webcam_frame(
     # Linux Video4Linux2 capture pipeline
     target_device = get_camera_device(device)
     if not os.path.exists(target_device):
-        print(f" [MILO] ⚠️ Camera device {target_device} not found.")
+        print(f" [ASTRA] ⚠️ Camera device {target_device} not found.")
         return None
 
     # Hardware MJPEG fast capture
@@ -217,12 +217,12 @@ def snap_webcam_frame(
         res = subprocess.run(cmd, capture_output=True, timeout=6)
         if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 1000:
             notify_camera_signal(out_file, query=query, status="analyzing")
-            print(f" [MILO] 📸 Frame snapped: {out_file} ({width}x{height} MJPEG)")
+            print(f" [ASTRA] 📸 Frame snapped: {out_file} ({width}x{height} MJPEG)")
             return out_file
     except subprocess.TimeoutExpired:
-        print(f" [MILO] ⚠️ ffmpeg MJPEG capture timed out on {target_device}")
+        print(f" [ASTRA] ⚠️ ffmpeg MJPEG capture timed out on {target_device}")
     except Exception as e:
-        print(f" [MILO] ⚠️ Primary capture error: {e}")
+        print(f" [ASTRA] ⚠️ Primary capture error: {e}")
 
     # Fallback: standard YUYV / auto capture format at 1280x720
     fallback_cmd = [
@@ -238,9 +238,9 @@ def snap_webcam_frame(
         res = subprocess.run(fallback_cmd, capture_output=True, timeout=6)
         if res.returncode == 0 and os.path.isfile(out_file) and os.path.getsize(out_file) > 1000:
             notify_camera_signal(out_file, query=query, status="analyzing")
-            print(f" [MILO] 📸 Fallback frame snapped: {out_file} (1280x720)")
+            print(f" [ASTRA] 📸 Fallback frame snapped: {out_file} (1280x720)")
             return out_file
     except Exception as ex:
-        print(f" [MILO] ❌ Camera capture fallback failed: {ex}")
+        print(f" [ASTRA] ❌ Camera capture fallback failed: {ex}")
 
     return None

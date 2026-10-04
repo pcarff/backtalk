@@ -69,25 +69,25 @@ MAX_TOOL_TURNS = int(CFG.get("max_tool_turns", 8))
 RUN_COMMAND_TIMEOUT = int(CFG.get("run_command_timeout", 90))
 RUN_COMMAND_MAX_OUTPUT = int(CFG.get("run_command_max_output", 4000))
 
-# Helper commands MILO can call through run_command. Any executable here with a
-# "# milo-tool: <description>" line is listed in her system prompt at startup.
-# Lives beside backtalk: /anzym/my-agent/milo-tools on Cortex, ~/my-agent/milo-tools on synapse.
-_DEFAULT_TOOLS_DIR = Path(__file__).resolve().parents[2] / "milo-tools"
-MILO_TOOLS_DIR = Path(os.path.expanduser(CFG.get("milo_tools_dir") or str(_DEFAULT_TOOLS_DIR)))
-# Tools tagged "# milo-host: cortex" drive Cortex's own hardware (ADK, GPU, X11 screen,
+# Helper commands ASTRA can call through run_command. Any executable here with a
+# "# astra-tool: <description>" line is listed in her system prompt at startup.
+# Lives beside backtalk: /anzym/my-agent/astra-tools on Cortex, ~/my-agent/astra-tools on synapse.
+_DEFAULT_TOOLS_DIR = Path(__file__).resolve().parents[2] / "astra-tools"
+ASTRA_TOOLS_DIR = Path(os.path.expanduser(CFG.get("astra_tools_dir") or str(_DEFAULT_TOOLS_DIR)))
+# Tools tagged "# astra-host: cortex" drive Cortex's own hardware (ADK, GPU, X11 screen,
 # PipeWire audio). On any other machine they're offered as `ssh cortex <tool>`.
 HOME_HOST = str(CFG.get("home_host", "cortex"))
-HOME_TOOLS_DIR = str(CFG.get("home_tools_dir", "/anzym/my-agent/milo-tools"))
+HOME_TOOLS_DIR = str(CFG.get("home_tools_dir", "/anzym/my-agent/astra-tools"))
 _HOSTNAME = socket.gethostname().split(".")[0]
 # run_command finds the tools by name on every machine, synced ~/.local/bin or not.
-os.environ["PATH"] = f"{MILO_TOOLS_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+os.environ["PATH"] = f"{ASTRA_TOOLS_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
-def _load_milo_tools() -> str:
+def _load_astra_tools() -> str:
     here = socket.gethostname().split(".")[0].lower()
     local, remote = [], []
-    if MILO_TOOLS_DIR.is_dir():
-        for tool in sorted(MILO_TOOLS_DIR.iterdir()):
+    if ASTRA_TOOLS_DIR.is_dir():
+        for tool in sorted(ASTRA_TOOLS_DIR.iterdir()):
             if not (tool.is_file() and os.access(tool, os.X_OK)):
                 continue
             try:
@@ -95,8 +95,8 @@ def _load_milo_tools() -> str:
                     head = [next(f, "") for _ in range(5)]
             except OSError:
                 continue
-            desc = next((l.split(":", 1)[1].strip() for l in head if l.startswith("# milo-tool:")), None)
-            host = next((l.split(":", 1)[1].strip().lower() for l in head if l.startswith("# milo-host:")), None)
+            desc = next((l.split(":", 1)[1].strip() for l in head if l.startswith("# astra-tool:")), None)
+            host = next((l.split(":", 1)[1].strip().lower() for l in head if l.startswith("# astra-host:")), None)
             if not desc:
                 continue
             if host and host != here:
@@ -105,7 +105,7 @@ def _load_milo_tools() -> str:
                 local.append(f"- `{tool.name}`: {desc}")
     if not local and not remote:
         return ""
-    log(f"[brain] loaded {len(local)} local + {len(remote)} remote command(s) from {MILO_TOOLS_DIR}")
+    log(f"[brain] loaded {len(local)} local + {len(remote)} remote command(s) from {ASTRA_TOOLS_DIR}")
     text = "### Local Hardware Commands (run via run_command; each takes --help)\n" + "\n".join(local)
     if remote:
         text += (f"\n\n### {HOME_HOST.title()} Commands (you are on {here}; these run on {HOME_HOST} over "
@@ -116,7 +116,7 @@ def _load_milo_tools() -> str:
 def _hardware_summary() -> str:
     """One-line list of attached serial/USB hardware for per-turn telemetry."""
     try:
-        res = subprocess.run([str(MILO_TOOLS_DIR / "milo-devices"), "--brief"],
+        res = subprocess.run([str(ASTRA_TOOLS_DIR / "astra-devices"), "--brief"],
                              capture_output=True, text=True, timeout=3)
         return res.stdout.strip()
     except Exception:
@@ -387,7 +387,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
         if tool_name == "switch_workspace":
             target = args.get("path") or args.get("project") or args.get("name", "")
             resolved = resolve_project_path(target, cwd)
-            print(f" [MILO] 📂 Switching workspace to: {resolved}...", flush=True)
+            print(f" [ASTRA] 📂 Switching workspace to: {resolved}...", flush=True)
             _set_signal_state("thinking")
             if not os.path.exists(resolved):
                 return f"Error: Workspace path {resolved} does not exist."
@@ -427,7 +427,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
         elif tool_name == "get_weather":
             loc = args.get("location", "").strip()
             loc_disp = loc if loc else "local station"
-            print(f" [MILO] 🌤️ Checking live weather for {loc_disp}...", flush=True)
+            print(f" [ASTRA] 🌤️ Checking live weather for {loc_disp}...", flush=True)
             _set_signal_state("thinking")
             url = f"https://wttr.in/{loc}?format=j1" if loc else "https://wttr.in/?format=j1"
             try:
@@ -472,7 +472,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
         elif tool_name == "get_fox_news":
             topic = str(args.get("topic") or args.get("category") or "latest").strip().lower()
-            print(f" [MILO] 📰 Fetching Fox News ({topic})...", flush=True)
+            print(f" [ASTRA] 📰 Fetching Fox News ({topic})...", flush=True)
             _set_signal_state("thinking")
             cat_map = {
                 "latest": "latest",
@@ -525,7 +525,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
         elif tool_name == "get_news":
             topic = str(args.get("topic") or args.get("query") or "top national and world news").strip()
-            print(f" [MILO] 📰 Checking live news for: \"{topic}\"...", flush=True)
+            print(f" [ASTRA] 📰 Checking live news for: \"{topic}\"...", flush=True)
             _set_signal_state("thinking")
             try:
                 results = []
@@ -546,7 +546,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             query = args.get("query", "")
             if not query:
                 return "Error: No search query provided."
-            print(f" [MILO] 🔍 Searching the web for: \"{query}\"...", flush=True)
+            print(f" [ASTRA] 🔍 Searching the web for: \"{query}\"...", flush=True)
             _set_signal_state("thinking")
             results = []
             with DDGS() as ddgs:
@@ -561,7 +561,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             url = args.get("url", "")
             if not url:
                 return "Error: No URL provided."
-            print(f" [MILO] 🌐 Fetching web page: {url}...", flush=True)
+            print(f" [ASTRA] 🌐 Fetching web page: {url}...", flush=True)
             _set_signal_state("thinking")
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             resp = httpx.get(url, headers=headers, timeout=12.0, follow_redirects=True)
@@ -576,7 +576,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             raw_p = args.get("path", ".")
             p = raw_p if os.path.isabs(raw_p) else os.path.join(cwd, raw_p)
             p = os.path.expanduser(p)
-            print(f" [MILO] 📂 Inspecting directory: {p}...", flush=True)
+            print(f" [ASTRA] 📂 Inspecting directory: {p}...", flush=True)
             _set_signal_state("thinking")
             if not os.path.exists(p):
                 return f"Error: Directory {p} does not exist."
@@ -605,7 +605,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             raw_p = args.get("path", "")
             p = raw_p if os.path.isabs(raw_p) else os.path.join(cwd, raw_p)
             p = os.path.expanduser(p)
-            print(f" [MILO] 📄 Reading file: {p}...", flush=True)
+            print(f" [ASTRA] 📄 Reading file: {p}...", flush=True)
             _set_signal_state("thinking")
             if not os.path.exists(p):
                 # Try finding file under cwd
@@ -624,7 +624,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             base = raw_p if os.path.isabs(raw_p) else os.path.join(cwd, raw_p)
             base = os.path.expanduser(base)
             query = args.get("query", "")
-            print(f" [MILO] 🔎 Searching files matching \"{query}\" in {base}...", flush=True)
+            print(f" [ASTRA] 🔎 Searching files matching \"{query}\" in {base}...", flush=True)
             _set_signal_state("thinking")
             matches = []
             for root, _, filenames in os.walk(base):
@@ -645,7 +645,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             if p.startswith("/Workspaces") and not os.path.exists(os.path.dirname(p)):
                 alt = "/workspaces" + p[len("/Workspaces"):]
                 p = alt
-            print(f" [MILO] ✍️ Writing file: {p} ({len(content)} chars)...", flush=True)
+            print(f" [ASTRA] ✍️ Writing file: {p} ({len(content)} chars)...", flush=True)
             _set_signal_state("thinking")
             try:
                 os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -675,7 +675,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 if not os.path.exists(target_cwd):
                     target_cwd = get_default_workspace()
 
-            print(f" [MILO] ⚙️ Running command: $ {cmd} (in {target_cwd})...", flush=True)
+            print(f" [ASTRA] ⚙️ Running command: $ {cmd} (in {target_cwd})...", flush=True)
             _set_signal_state("thinking")
             try:
                 res = subprocess.run(cmd, shell=True, cwd=target_cwd, capture_output=True, text=True,
@@ -688,7 +688,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 return f"Command output ($ {cmd} in {target_cwd}, exit {res.returncode}):\n{out}"
             except subprocess.TimeoutExpired:
                 return (f"Command timed out after {RUN_COMMAND_TIMEOUT}s: {cmd}. If it streams forever "
-                        f"(serial port, ros2 topic echo), use a bounded form like milo-serial or --once.")
+                        f"(serial port, ros2 topic echo), use a bounded form like astra-serial or --once.")
             except Exception as e:
                 return f"Command execution failed: {e}"
 
@@ -696,7 +696,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             prompt = str(args.get("prompt") or args.get("description") or "").strip()
             if not prompt:
                 return "Error: No prompt provided for image generation."
-            print(f" [MILO] 🎨 Generating image via FLUX.1: \"{prompt}\"...", flush=True)
+            print(f" [ASTRA] 🎨 Generating image via FLUX.1: \"{prompt}\"...", flush=True)
             _set_signal_state("thinking")
 
             output_dir = os.path.expanduser("~/Pictures/Flux_Generations")
@@ -738,7 +738,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                             with open(output_file, "wb") as f:
                                 f.write(base64.b64decode(b64_data))
                             used_api = True
-                            print(f" [MILO] 🎨 FLUX image generated via {s_url}", flush=True)
+                            print(f" [ASTRA] 🎨 FLUX image generated via {s_url}", flush=True)
                             break
                 except Exception:
                     continue
@@ -746,7 +746,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             # Fallback 1: If HTTP API failed and host is remote, run run-flux.sh on Cortex via SSH
             if not used_api and (host not in ("127.0.0.1", "localhost") or not os.path.exists("/workspaces_nvme")):
                 try:
-                    print(" [MILO] 🔄 Attempting remote FLUX generation on Cortex via SSH fallback...", flush=True)
+                    print(" [ASTRA] 🔄 Attempting remote FLUX generation on Cortex via SSH fallback...", flush=True)
                     safe_prompt = prompt.replace("'", "'\\''")
                     ssh_cmd = [
                         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "cortex",
@@ -761,9 +761,9 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                             scp_res = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
                             if scp_res.returncode == 0:
                                 used_api = True
-                                print(f" [MILO] 🎨 FLUX image retrieved from Cortex via SSH to {output_file}", flush=True)
+                                print(f" [ASTRA] 🎨 FLUX image retrieved from Cortex via SSH to {output_file}", flush=True)
                 except Exception as ex:
-                    print(f" [MILO] ⚠️ SSH FLUX fallback failed: {ex}", flush=True)
+                    print(f" [ASTRA] ⚠️ SSH FLUX fallback failed: {ex}", flush=True)
 
             # Fallback 2: Standalone local sd-cli if running on Cortex
             if not used_api and os.path.exists("/workspaces_nvme/stable-diffusion.cpp/build/bin/sd-cli"):
@@ -790,7 +790,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
                 if res.returncode != 0:
                     err_snippet = res.stderr[-400:] if res.stderr else (res.stdout[-400:] if res.stdout else "Process failed")
-                    print(f" [MILO] ❌ FLUX generation failed (code {res.returncode}): {err_snippet}", flush=True)
+                    print(f" [ASTRA] ❌ FLUX generation failed (code {res.returncode}): {err_snippet}", flush=True)
                     return f"Error: Image generation failed (code {res.returncode}): {err_snippet}"
 
             # Verify the newly created output file specifically
@@ -814,8 +814,8 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             if target_image and os.path.isfile(target_image):
                 candidate_img = target_image
             elif target_image:
-                # Check output_dir, cwd, /workspaces/milo_pic
-                for base_dir in (output_dir, cwd, "/workspaces/milo_pic", os.path.expanduser("~/Pictures")):
+                # Check output_dir, cwd, /workspaces/astra_pic
+                for base_dir in (output_dir, cwd, "/workspaces/astra_pic", os.path.expanduser("~/Pictures")):
                     chk = os.path.join(base_dir, target_image)
                     if os.path.isfile(chk):
                         candidate_img = chk
@@ -833,7 +833,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             if not motion_prompt:
                 motion_prompt = "natural fluid movement, warm atmospheric lighting flicker, realistic physical dynamics"
 
-            print(f" [MILO] 🎬 Animating image via Wan2.1 14B: {candidate_img} (prompt: \"{motion_prompt}\", {frames} frames)...", flush=True)
+            print(f" [ASTRA] 🎬 Animating image via Wan2.1 14B: {candidate_img} (prompt: \"{motion_prompt}\", {frames} frames)...", flush=True)
             _set_signal_state("thinking")
 
             runner_script = "/home/pcarff/Desktop/run-wan-i2v.sh"
@@ -845,7 +845,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
                 if res.returncode != 0:
                     err_snippet = res.stderr[-400:] if res.stderr else (res.stdout[-400:] if res.stdout else "Process failed")
-                    print(f" [MILO] ❌ Wan2.1 animation failed (code {res.returncode}): {err_snippet}", flush=True)
+                    print(f" [ASTRA] ❌ Wan2.1 animation failed (code {res.returncode}): {err_snippet}", flush=True)
                     return f"Error: Video generation failed (code {res.returncode}): {err_snippet}"
 
                 # Find the newest generated mp4 or webm in output_dir
@@ -871,7 +871,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             query = str(args.get("query") or args.get("topic") or args.get("terms") or "").strip()
             source = str(args.get("source") or "all").strip().lower()
             max_results = int(args.get("max_results", 5))
-            print(f" [MILO] 🧠 Recalling cross-agent memories for '{query}' (source: {source})...", flush=True)
+            print(f" [ASTRA] 🧠 Recalling cross-agent memories for '{query}' (source: {source})...", flush=True)
             _set_signal_state("thinking")
             return search_agent_memories(query, source, max_results)
 
@@ -882,10 +882,10 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                     "Inspect what the user is holding up to the camera or showing you. "
                     "Identify all visible hardware components, microcontrollers, wiring, pin markings, text, or objects."
                 )
-            print(f" [MILO] 📸 Snapping live optical telemetry via webcam...", flush=True)
+            print(f" [ASTRA] 📸 Snapping live optical telemetry via webcam...", flush=True)
             _set_signal_state("thinking")
             cam_dev = CFG.get("camera_device") or "/dev/video0"
-            cam_dir = CFG.get("camera_dir") or "/workspaces_nvme/milo_pic"
+            cam_dir = CFG.get("camera_dir") or "/workspaces_nvme/astra_pic"
             from backtalk.camera import snap_webcam_frame
             snap_file = snap_webcam_frame(output_dir=cam_dir, device=cam_dev, query=user_query)
             if not snap_file:
@@ -894,9 +894,9 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
             # Auto-launch or summon Steampunk Viewfinder HUD if in GUI desktop session
             if os.environ.get("DISPLAY"):
                 try:
-                    res = subprocess.run("pgrep -f milo_viewfinder", shell=True, capture_output=True)
+                    res = subprocess.run("pgrep -f astra_viewfinder", shell=True, capture_output=True)
                     if res.returncode != 0:
-                        vf_path = "/anzym/my-agent/milo_visualizer/milo_viewfinder.py"
+                        vf_path = "/anzym/my-agent/astra_visualizer/astra_viewfinder.py"
                         if os.path.isfile(vf_path):
                             subprocess.Popen(["python3", vf_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
@@ -928,7 +928,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                 if files:
                     candidate = max(files, key=os.path.getmtime)
             elif target_path:
-                for base in (cwd, "/workspaces_nvme/milo_pic", "/workspaces/milo_pic", "/workspaces", os.path.expanduser("~/Pictures")):
+                for base in (cwd, "/workspaces_nvme/astra_pic", "/workspaces/astra_pic", "/workspaces", os.path.expanduser("~/Pictures")):
                     p = os.path.join(base, target_path)
                     if os.path.isfile(p):
                         candidate = p
@@ -936,7 +936,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
             # Check search directories
             if not candidate and target_path:
-                search_dirs = ["/workspaces_nvme/milo_pic", "/workspaces/milo_pic", os.path.expanduser("~/Pictures/Screenshots"), os.path.expanduser("~/Pictures")]
+                search_dirs = ["/workspaces_nvme/astra_pic", "/workspaces/astra_pic", os.path.expanduser("~/Pictures/Screenshots"), os.path.expanduser("~/Pictures")]
                 exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
                 found = []
                 for sdir in search_dirs:
@@ -954,10 +954,10 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
             # If no candidate found and no target specified, snap live from webcam eyes
             if not candidate:
-                print(" [MILO] 👁️ No local image file specified; snapping live frame from webcam eyes...", flush=True)
+                print(" [ASTRA] 👁️ No local image file specified; snapping live frame from webcam eyes...", flush=True)
                 return execute_tool("inspect_camera", {"query": user_query}, brain_ref)
 
-            print(f" [MILO] 👁️ Inspecting visual telemetry: {candidate}...", flush=True)
+            print(f" [ASTRA] 👁️ Inspecting visual telemetry: {candidate}...", flush=True)
             _set_signal_state("thinking")
 
             try:
@@ -980,7 +980,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": f"You are MILO, lead robotics flight director. Deliver a crisp, spoken visual briefing (under 150 words): {user_query}"
+                                    "text": f"You are ASTRA, lead robotics flight director. Deliver a crisp, spoken visual briefing (under 150 words): {user_query}"
                                 },
                                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_img}"}}
                             ]
@@ -1008,7 +1008,7 @@ def execute_tool(tool_name: str, args: dict, brain_ref=None) -> str:
 
 TOOL_PROMPT = """
 ### OPERATIONAL DIRECTIVE: MULTI-STEP TOOLS & GUARANTEED SPOKEN ANSWERS
-You are MILO (Machine Intelligence Liaison Officer), lead robotics flight director.
+You are ASTRA (Autonomous Systems & Telemetry Robotics Assistant), lead robotics flight director.
 
 RULES:
 1. When you need to inspect directories, read code files, inspect images/hardware photos, capture webcam optical feeds, recall past memories, check live weather, search live news, generate images, or animate images into video, invoke tools using <tool_call>{"tool": "name", ...}</tool_call>.
@@ -1031,7 +1031,7 @@ Available Tools:
 - write_file(path, content): Create or overwrite a source file, Arduino sketch, or configuration file directly without shell escaping issues.
 - search_files(path, query): Search for files by name.
 - run_command(cmd, cwd): Execute shell commands. Note: 'arduino-cli' is installed for compiling and flashing AVR/ESP32 boards (e.g. arduino-cli compile --fqbn arduino:avr:uno <sketch_dir> && arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno <sketch_dir>).
-  Hardware the user plugs in (USB serial, Arduino, dev boards) and Bluetooth devices are attached to the machine run_command executes on (named in the [Hardware on ...] line every message includes). Never tell the user you can't reach a device until you have checked with run_command (e.g. `milo-devices`). Prefer the Local Hardware Commands below over improvising a protocol.
+  Hardware the user plugs in (USB serial, Arduino, dev boards) and Bluetooth devices are attached to the machine run_command executes on (named in the [Hardware on ...] line every message includes). Never tell the user you can't reach a device until you have checked with run_command (e.g. `astra-devices`). Prefer the Local Hardware Commands below over improvising a protocol.
 - generate_image(prompt): Generate an image using the FLUX.1 diffusion engine on Cortex and display it on the user's screen.
 - animate_image(image_path, prompt, frames): Animate a still image into a short cinematic video using the Wan2.1 14B Image-to-Video diffusion engine. If image_path is omitted, automatically animates the newest generated FLUX image.
 """
@@ -1191,9 +1191,9 @@ class WarmBrain:
     def _load_system_prompt(self) -> str:
         agent_dir = Path(os.path.expanduser(CFG.get("agent_dir", "/anzym/my-agent")))
         prompt_parts = [DISCIPLINE, TOOL_PROMPT]
-        milo_tools = _load_milo_tools()
-        if milo_tools:
-            prompt_parts.append(milo_tools)
+        astra_tools = _load_astra_tools()
+        if astra_tools:
+            prompt_parts.append(astra_tools)
 
         for filename in ("AGENT.md", "CLAUDE.md", "SYSTEM.md"):
             p = agent_dir / filename

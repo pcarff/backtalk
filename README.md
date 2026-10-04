@@ -73,7 +73,7 @@ backtalk supports real-time computer vision through local and USB webcams:
   - **macOS:** Uses `ffmpeg -f avfoundation` on the built-in FaceTime HD camera or USB webcams.
 - **Configuration in `backtalk.json`:**
   - `"camera_device": "/dev/video0"` (or `"default"` on macOS)
-  - `"camera_dir": "/workspaces_nvme/milo_pic"` (or `~/Pictures/milo_eyes`)
+  - `"camera_dir": "/workspaces_nvme/astra_pic"` (or `~/Pictures/astra_eyes`)
 - **Signals Bus:** Writes capture metadata to `.camera_snap` in `signals_dir` for live HUDs (like the Steampunk Viewfinder) to display in real time.
 
 ## The fine print that matters

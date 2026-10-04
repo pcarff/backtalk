@@ -709,7 +709,7 @@ async def amain():
         mouth.say("Bad news. The voice and the face are fine, but I "
                   "couldn't reach my brain, the local LLM server. "
                   "Check this window for the error. Confirm that "
-                  "milo-llm.service is running on port 8080.")
+                  "astra-llm.service is running on port 8080.")
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
@@ -756,7 +756,7 @@ async def amain():
 
     def _file_say_reader():
         """Speak text dropped on the signal bus (.say) verbatim, no LLM turn.
-        Used by milo-remind; waits for MILO to finish her current sentence
+        Used by astra-remind; waits for ASTRA to finish her current sentence
         (up to 20 s) so a reminder doesn't cut into a reply."""
         say_p = os.path.join(CFG.get("signals_dir", "/dev/shm/signals"), ".say")
         while True:
