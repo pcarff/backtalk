@@ -1253,6 +1253,15 @@ class WarmBrain:
             "turns": self.session["turns"],
         }
 
+    def compact(self, keep_last: int = 8) -> bool:
+        """Compact conversation history by retaining system prompt and recent turns."""
+        if len(self.messages) > (keep_last + 1):
+            before = len(self.messages)
+            self.messages = [self.messages[0]] + self.messages[-keep_last:]
+            log(f"[brain] compacted conversation history from {before} to {len(self.messages)} messages")
+            return True
+        return False
+
     async def command(self, cmd: str) -> str:
         parts = cmd.strip().split()
         if not parts:
@@ -1264,9 +1273,8 @@ class WarmBrain:
             self.session = {"turns": 0, "out_tokens": 0, "in_tokens": 0, "cost": 0.0}
             return "Conversation history cleared."
         elif verb == "/compact":
-            if len(self.messages) > 9:
-                self.messages = [self.messages[0]] + self.messages[-8:]
-            return "Session compacted."
+            compacted = self.compact(keep_last=8)
+            return "Session compacted." if compacted else "Session already compact."
         elif verb == "/model" and len(parts) > 1:
             self.model = parts[1]
             return f"Switched model to {self.model}."
@@ -1306,12 +1314,26 @@ class WarmBrain:
             "temperature": 0.3,
             "max_tokens": 2048,
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(f"{self.api_base}/chat/completions", json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            return ""
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(f"{self.api_base}/chat/completions", json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                err_text = resp.text
+                log(f"[brain] local LLM error {resp.status_code}: {err_text[:300]}")
+                if resp.status_code == 400 and ("exceed" in err_text.lower() or "context" in err_text.lower()):
+                    if self.compact(keep_last=6):
+                        log("[brain] auto-compacted context after overflow in _query_llm; retrying...")
+                        payload["messages"] = self.messages
+                        retry_resp = await client.post(f"{self.api_base}/chat/completions", json=payload)
+                        if retry_resp.status_code == 200:
+                            data = retry_resp.json()
+                            return data["choices"][0]["message"]["content"]
+                        log(f"[brain] retry after compact failed ({retry_resp.status_code}): {retry_resp.text[:300]}")
+        except Exception as e:
+            log(f"[brain] local LLM query exception: {e}")
+        return ""
 
     async def _query_anthropic(self, messages: list) -> str:
         system, turns = _split_messages(messages)
@@ -1451,6 +1473,11 @@ class WarmBrain:
             user_msg = f"{utterance}\n\n[Active Workspace Telemetry]:{snapshot}"
         self.messages.append({"role": "user", "content": user_msg})
 
+        # Proactively guard context size to prevent exceeding llama-server context window
+        total_chars = sum(len(m.get("content", "")) for m in self.messages)
+        if total_chars > 300000 or len(self.messages) > 20:
+            self.compact(keep_last=8)
+
         # Step 1: Multi-turn tool execution loop
         max_tool_turns = MAX_TOOL_TURNS
         for turn_idx in range(max_tool_turns):
@@ -1544,15 +1571,28 @@ class WarmBrain:
             "max_tokens": 2048,
         }
 
+        stream_target_messages = speech_messages
+        retried = False
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream("POST", f"{self.api_base}/chat/completions", json=payload) as response:
-                    if response.status_code != 200:
-                        err_text = await response.aread()
-                        log(f"[brain] server error {response.status_code}: {err_text.decode('utf-8', errors='ignore')}")
-                        yield "I had trouble connecting to the local inference server."
-                        self._dirty = False
-                        return
+                while True:
+                    payload["messages"] = stream_target_messages
+                    async with client.stream("POST", f"{self.api_base}/chat/completions", json=payload) as response:
+                        if response.status_code != 200:
+                            err_bytes = await response.aread()
+                            err_text = err_bytes.decode('utf-8', errors='ignore')
+                            log(f"[brain] server error {response.status_code}: {err_text}")
+                            if not retried and response.status_code == 400 and ("exceed" in err_text.lower() or "context" in err_text.lower()):
+                                if self.compact(keep_last=6):
+                                    log("[brain] auto-compacted context during stream after overflow; retrying...")
+                                    retried = True
+                                    stream_target_messages = self.messages + [
+                                        {"role": "user", "content": "[Instruction]: You MUST deliver your spoken flight director briefing directly to the user now in natural speech. Do NOT call any tools. Do NOT output JSON, XML, or code blocks. Report your status, findings, or errors clearly and guide the user on the next step."}
+                                    ]
+                                    continue
+                            yield "I had trouble connecting to the local inference server."
+                            self._dirty = False
+                            return
 
                     async for line in response.aiter_lines():
                         if self._interrupted:
@@ -1585,6 +1625,7 @@ class WarmBrain:
                                         yielded_any = True
                         except Exception:
                             continue
+                    break
         except Exception as e:
             log(f"[brain] error querying {self.api_base}: {e}")
             yield "Sorry, I lost connection to the local model."
