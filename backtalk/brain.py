@@ -1594,37 +1594,37 @@ class WarmBrain:
                             self._dirty = False
                             return
 
-                    async for line in response.aiter_lines():
-                        if self._interrupted:
-                            log("[brain] stream interrupted")
-                            break
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            delta = chunk["choices"][0]["delta"].get("content", "")
-                            if delta:
-                                if "<|im_end|>" in delta or "<|endoftext|>" in delta:
-                                    delta = _SPECIAL_TOKENS.sub("", delta)
+                        async for line in response.aiter_lines():
+                            if self._interrupted:
+                                log("[brain] stream interrupted")
+                                break
+                            if not line.startswith("data: "):
+                                continue
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                                delta = chunk["choices"][0]["delta"].get("content", "")
+                                if delta:
+                                    if "<|im_end|>" in delta or "<|endoftext|>" in delta:
+                                        delta = _SPECIAL_TOKENS.sub("", delta)
+                                        buf += delta
+                                        full_reply += delta
+                                        break
                                     buf += delta
                                     full_reply += delta
-                                    break
-                                buf += delta
-                                full_reply += delta
-                                while True:
-                                    m_sent = _SENTENCE_END.search(buf)
-                                    if not m_sent:
-                                        break
-                                    sentence, buf = buf[:m_sent.end()].strip(), buf[m_sent.end():]
-                                    cleaned = _clean_text(sentence)
-                                    if cleaned:
-                                        yield cleaned
-                                        yielded_any = True
-                        except Exception:
-                            continue
+                                    while True:
+                                        m_sent = _SENTENCE_END.search(buf)
+                                        if not m_sent:
+                                            break
+                                        sentence, buf = buf[:m_sent.end()].strip(), buf[m_sent.end():]
+                                        cleaned = _clean_text(sentence)
+                                        if cleaned:
+                                            yield cleaned
+                                            yielded_any = True
+                            except Exception:
+                                continue
                     break
         except Exception as e:
             log(f"[brain] error querying {self.api_base}: {e}")
